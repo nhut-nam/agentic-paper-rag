@@ -1,0 +1,25 @@
+# App Settings
+LOG_LEVEL: "INFO"
+
+# Database Settings
+DB_USER: "postgres"
+DB_PASSWORD: "postgres"
+DB_NAME: "paper_intel"
+DB_HOST: "localhost"
+DB_PORT: 5432
+
+# Ollama Settings (for LLM, Summary, Keywords)
+OLLAMA_BASE_URL: "http://localhost:11434"
+OLLAMA_LLM_MODEL: "gemma3:4b"
+
+# Local Embedding Settings (Transformers Singleton)
+EMBEDDING_MODEL_NAME: "sentence-transformers/all-MiniLM-L6-v2"
+
+# Marker Settings
+USE_LLM: false
+OUTPUT_FORMAT: "markdown"
+DISABLE_IMAGE_EXTRACTION: false
+DISABLE_OCR: true
+
+# Pipeline Settings
+OUTPUT_ROOT: "marker-output"

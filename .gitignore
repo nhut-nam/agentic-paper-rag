@@ -1,0 +1,28 @@
+# Virtual Environment
+venv/
+.venv/
+env/
+ENV/
+
+# Python caching & bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment Variables & Secrets
+.env
+.env.*
+
+# Local data, storage, and processing outputs
+storage/
+marker-output/
+logs/
+*.log
+
+# IDE settings
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
