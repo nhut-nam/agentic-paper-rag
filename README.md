@@ -1,4 +1,4 @@
-# Paper Intelligent AI
+# Multi-agent RAG
 
 Hệ thống RAG nâng cao kết hợp Multi-Agent (đại lý đa tác vụ) để đọc, phân tích và trả lời câu hỏi về bài báo khoa học. Dự án sử dụng mô hình LLM chạy cục bộ (Ollama) kết hợp LangGraph để điều phối luồng xử lý.
 
