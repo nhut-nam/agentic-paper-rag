@@ -12,7 +12,7 @@ class Planner:
         """
         self.llm = llm
         
-    def plan(self, query: str, language: str = "English", mode: str = "answer", 
+    def plan(self, query: str, language: str = "English",
              global_metadata: str = "", agent_metadata: str = "") -> Tuple[Plan, List[Task]]:
         """
         Uses LLM to break down a query into a Plan and a list of sequential Tasks.
@@ -20,14 +20,20 @@ class Planner:
         """
         plan_id = str(uuid.uuid4())
         plan = Plan(id=plan_id, query=query)
-        logger.info(f"Planner starting decomposition (Mode: {mode}) for query: '{query}'")
+        logger.info(f"Planner starting decomposition for query: '{query}'")
         
         prompt = f"""
         You are the System Planner. Your job is to break down the user's query into a logical sequence of actionable tasks and assign the best agent to each task.
         
         CRITICAL RULES:
-        1. The query requires a "{mode}" mode approach. If "analyze", break it down into deep analytical steps. If "answer", keep it to a direct lookup.
-        2. Ensure the tasks are generated in the following language: {language}.
+        1. Generate the MINIMUM number of tasks needed to answer the query:
+           - For simple lookups: EXACTLY 1 task.
+           - For complex multi-part queries: maximum 2-3 tasks.
+        2. FORBIDDEN TASKS — Do NOT generate tasks that:
+           - Translate, rephrase, or summarize the query itself.
+           - Are meta-tasks (e.g., "Understand the query", "Translate to English").
+        3. Each task MUST start with an action verb: Search, Find, Retrieve, Analyze, Compare.
+        4. Task content MUST be written in English.
         
         AVAILABLE AGENTS:
         {agent_metadata}
@@ -37,14 +43,13 @@ class Planner:
         
         Query: "{query}"
         
-        Respond ONLY with a valid JSON array of objects representing the tasks. Each object must have:
-        - "content": A string describing the task clearly.
-        - "agent": The name of the agent assigned to this task (e.g., "research").
+        Respond ONLY with a valid JSON array of objects. Each object must have:
+        - "content": A specific research instruction in English.
+        - "agent": The name of the agent (always use "research").
         
-        Example output format:
+        Example output for an "answer" mode query:
         [
-            {{"content": "Search the local knowledge base for context regarding X.", "agent": "research"}},
-            {{"content": "Synthesize the gathered information into a report.", "agent": "synthesis"}}
+            {{"content": "Search the local knowledge base for the optimizer and batch size used during ViT pre-training on JFT-300M.", "agent": "research"}}
         ]
         """
         

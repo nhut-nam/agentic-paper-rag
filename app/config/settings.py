@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     
     # Local Embedding Settings
     EMBEDDING_MODEL_NAME: str = "sentence-transformers/all-MiniLM-L6-v2"
+    
+    # Local Reranker Settings
+    RERANKER_MODEL_NAME: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
     @property
     def database_url(self) -> str:

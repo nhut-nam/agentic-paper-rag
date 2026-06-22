@@ -180,23 +180,30 @@ class DatabaseHandler:
         finally:
             conn.close()
 
-    def hybrid_search(self, query_vector: list, query_keywords: list, limit: int = 5, doc_id: Optional[str] = None) -> List[dict]:
+    def hybrid_search(self, query_vector: list, query_keywords: list, limit: int = 5, doc_id: Optional[str] = None, doc_ids: Optional[List[str]] = None) -> List[dict]:
+        # Merge doc_id and doc_ids into a unique list
+        target_ids = []
+        if doc_ids:
+            target_ids.extend(doc_ids)
+        if doc_id and doc_id not in target_ids:
+            target_ids.append(doc_id)
+
         conn = self.get_connection()
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 # Weighted score: 70% Vector similarity + 30% Keyword overlap
-                if doc_id:
+                if target_ids:
                     sql = """
                     SELECT *, 
                            (1 - (embedding <=> %s::vector)) AS vector_score,
                            (SELECT count(*) FROM unnest(keywords) k WHERE k = ANY(%s)) AS keyword_score
                     FROM chunks
-                    WHERE doc_id = %s
+                    WHERE doc_id = ANY(%s)
                     ORDER BY ((1 - (embedding <=> %s::vector)) * 0.7 + 
                              (SELECT count(*) FROM unnest(keywords) k WHERE k = ANY(%s)) * 0.3) DESC
                     LIMIT %s
                     """
-                    cur.execute(sql, (query_vector, query_keywords, doc_id, query_vector, query_keywords, limit))
+                    cur.execute(sql, (query_vector, query_keywords, target_ids, query_vector, query_keywords, limit))
                 else:
                     sql = """
                     SELECT *, 
@@ -338,6 +345,27 @@ class DatabaseHandler:
             logger.error(f"Failed to link session_document: {e}")
             conn.rollback()
             raise
+        finally:
+            conn.close()
+
+    def get_session_documents(self, session_id: str) -> List[dict]:
+        conn = self.get_connection()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT d.* 
+                    FROM documents d
+                    JOIN session_chat_documents sd ON d.doc_id = sd.doc_id
+                    WHERE sd.session_id = %s
+                    ORDER BY d.created_at DESC
+                    """,
+                    (session_id,)
+                )
+                return cur.fetchall()
+        except Exception as e:
+            logger.error(f"Failed to get session documents for session {session_id}: {e}")
+            return []
         finally:
             conn.close()
 

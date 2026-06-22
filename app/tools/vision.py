@@ -1,12 +1,12 @@
 import os
 from langchain_core.tools import tool
-from typing import Optional
+from typing import Optional, List
 from app.utils.logger import logger
 import ollama
 
-def get_vision_tool(doc_id: Optional[str] = None):
+def get_vision_tool(doc_id: Optional[str] = None, doc_ids: Optional[List[str]] = None):
     """
-    Returns a configured vision_tool scoped to a specific doc_id to resolve relative image paths.
+    Returns a configured vision_tool scoped to a specific doc_id or list of doc_ids to resolve relative image paths.
     """
     @tool("vision_tool")
     def vision_tool(image_path: str) -> str:
@@ -17,22 +17,42 @@ def get_vision_tool(doc_id: Optional[str] = None):
         Args:
             image_path (str): The path to the image file (e.g. '../images/{image_id}/image.png').
         """
-        logger.info(f"Vision tool invoked with image_path: '{image_path}', doc_id: '{doc_id}'")
+        logger.info(f"Vision tool invoked with image_path: '{image_path}', doc_id: '{doc_id}', doc_ids: '{doc_ids}'")
         
+        # Target ids list
+        target_ids = []
+        if doc_ids:
+            target_ids.extend(doc_ids)
+        if doc_id and doc_id not in target_ids:
+            target_ids.append(doc_id)
+
         # 1. Resolve relative path to actual disk path
         resolved_path = image_path
         
-        if image_path.startswith("../images/") and doc_id:
+        if image_path.startswith("../images/") and target_ids:
             # "../images/fig1/image.png" -> "storage/processed/{doc_id}/images/fig1/image.png"
             relative_part = image_path.replace("../images/", "")
-            resolved_path = f"storage/processed/{doc_id}/images/{relative_part}"
-            
-        elif "images/" in image_path and doc_id:
+            for t_id in target_ids:
+                temp_path = f"storage/processed/{t_id}/images/{relative_part}"
+                if os.path.exists(temp_path):
+                    resolved_path = temp_path
+                    break
+            else:
+                resolved_path = f"storage/processed/{target_ids[0]}/images/{relative_part}"
+                
+        elif "images/" in image_path and target_ids:
             # Handle cases where LLM might omit "../"
             # e.g., "images/fig1/image.png" -> "storage/processed/{doc_id}/images/fig1/image.png"
             if not image_path.startswith("storage/"):
                 parts = image_path.split("images/")
-                resolved_path = f"storage/processed/{doc_id}/images/{parts[-1]}"
+                relative_part = parts[-1]
+                for t_id in target_ids:
+                    temp_path = f"storage/processed/{t_id}/images/{relative_part}"
+                    if os.path.exists(temp_path):
+                        resolved_path = temp_path
+                        break
+                else:
+                    resolved_path = f"storage/processed/{target_ids[0]}/images/{relative_part}"
                 
         # 2. Try secondary fallback lookup using storage base dir if still not found
         if not os.path.exists(resolved_path):

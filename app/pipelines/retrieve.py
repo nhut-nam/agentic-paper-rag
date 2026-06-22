@@ -19,7 +19,7 @@ class RetrievePipeline(BasePipeline):
         logger.info("Initializing KeyBERT for Query Keyword Extraction...")
         self.kw_model = KeyBERT(model=embedding_service.model)
 
-    def run(self, query: str, top_k: int = 5, doc_id: str = None, **kwargs) -> List[Dict[str, Any]]:
+    def run(self, query: str, top_k: int = 5, doc_id: str = None, doc_ids: List[str] = None, **kwargs) -> List[Dict[str, Any]]:
         """
         Executes the retrieval workflow.
         """
@@ -51,29 +51,63 @@ class RetrievePipeline(BasePipeline):
             logger.info("Generating query embedding using local model...")
             query_vector = embedding_service.encode(query)
 
-            # 3. Hybrid Search in DB (Vector Similarity + Keyword Overlap)
-            logger.info(f"Performing hybrid search (top_{top_k}, doc_id={doc_id})...")
-            raw_results = self.db.hybrid_search(query_vector, query_keywords, limit=top_k, doc_id=doc_id)
+            # 3. Hybrid Search in DB (Vector Similarity + Keyword Overlap) - Fetch larger candidate pool
+            candidate_limit = max(15, top_k)
+            logger.info(f"Performing hybrid search (candidates={candidate_limit}, doc_id={doc_id}, doc_ids={doc_ids})...")
+            raw_results = self.db.hybrid_search(query_vector, query_keywords, limit=candidate_limit, doc_id=doc_id, doc_ids=doc_ids)
 
-            # 4. Reranking & Formatting
-            results = []
+            # 4. Processing candidates
+            candidates = []
             for row in raw_results:
                 # Convert embedding if it's still a string
                 if isinstance(row.get("embedding"), str):
                     vec_str = row["embedding"].strip("[]")
                     row["embedding"] = [float(x) for x in vec_str.split(",")]
                 
-                results.append({
+                candidates.append({
                     "chunk": Chunk(**row),
                     "vector_score": row["vector_score"],
                     "keyword_score": row["keyword_score"],
                     "combined_score": (row["vector_score"] * 0.7 + (row["keyword_score"] * 0.1)) # Normalized keyword score
                 })
 
-            # Sort by combined score just in case
-            results.sort(key=lambda x: x["combined_score"], reverse=True)
+            # 5. Check Bypass Heuristic: if any chunk has keyword match ratio >= 0.8
+            bypass_rerank = False
+            total_keywords = len(query_keywords)
+            if total_keywords > 0:
+                for cand in candidates:
+                    ratio = cand["keyword_score"] / total_keywords
+                    if ratio >= 0.8:
+                        bypass_rerank = True
+                        logger.info(f"Bypass Rerank triggered: Candidate {cand['chunk'].chunk_id} matches {cand['keyword_score']}/{total_keywords} keywords (ratio: {ratio:.2f} >= 0.8).")
+                        break
 
-            logger.info(f"Found {len(results)} relevant chunks.")
+            if bypass_rerank or not candidates:
+                logger.info("Using hybrid search scores directly (Bypassed Rerank or empty candidates).")
+                candidates.sort(key=lambda x: x["combined_score"], reverse=True)
+                results = candidates[:top_k]
+            else:
+                logger.info(f"Reranking {len(candidates)} candidate chunks using Cross-Encoder...")
+                try:
+                    from app.llm.reranker import reranker_service
+                    doc_contents = [c["chunk"].content for c in candidates]
+                    rerank_scores = reranker_service.predict(query, doc_contents)
+                    
+                    # Update scores with semantic rerank scores
+                    for cand, score in zip(candidates, rerank_scores):
+                        cand["rerank_score"] = score
+                        cand["combined_score"] = score
+                        
+                    # Sort candidates by rerank score
+                    candidates.sort(key=lambda x: x["combined_score"], reverse=True)
+                    results = candidates[:top_k]
+                    logger.info("Reranking completed successfully.")
+                except Exception as e:
+                    logger.error(f"Reranking failed: {e}. Falling back to hybrid scores.", exc_info=True)
+                    candidates.sort(key=lambda x: x["combined_score"], reverse=True)
+                    results = candidates[:top_k]
+
+            logger.info(f"Selected top {len(results)} relevant chunks.")
             return results
 
         except Exception as e:

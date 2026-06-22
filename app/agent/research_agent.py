@@ -12,12 +12,19 @@ class ResearchAgent(BaseAgent):
     """
     Agent responsible for conducting research using a custom LangGraph ReAct Sub-Graph.
     """
-    def __init__(self, llm=None, doc_id=None):
+    def __init__(self, llm=None, doc_id=None, doc_ids=None):
         llm_instance = llm or OllamaLLM(base_url=settings.OLLAMA_BASE_URL, model=settings.OLLAMA_LLM_MODEL)
         
-        # Inject doc_id dynamically to retrieve and vision tools
-        scoped_retrieve_tool = get_retrieve_tool(doc_id=doc_id)
-        scoped_vision_tool = get_vision_tool(doc_id=doc_id)
+        # Merge doc_id and doc_ids
+        target_ids = []
+        if doc_ids:
+            target_ids.extend(doc_ids)
+        if doc_id and doc_id not in target_ids:
+            target_ids.append(doc_id)
+            
+        # Inject target_ids dynamically to retrieve and vision tools
+        scoped_retrieve_tool = get_retrieve_tool(doc_ids=target_ids)
+        scoped_vision_tool = get_vision_tool(doc_ids=target_ids)
         tools_list = [scoped_retrieve_tool, web_search_tool, scoped_vision_tool]
         
         super().__init__(
@@ -58,11 +65,15 @@ class ResearchAgent(BaseAgent):
         query = state["query"]
         scratchpad = state.get("scratchpad", "")
         iterations = state.get("iterations", 0)
-        mode = state.get("mode", "answer")
         
         tool_desc = "\n".join([f"- {t.name}: {t.description}" for t in self.tools])
         tool_names = ", ".join([t.name for t in self.tools])
         
+        # Define loop warning for final iteration (iteration 3)
+        loop_warning = ""
+        if iterations == 3:
+            loop_warning = "\nWARNING: This is your final iteration! You must synthesize the observations from the previous steps and provide the Final Answer now. You are NOT allowed to take another action."
+            
         prompt = f"""{self.system_prompt}
 
 
@@ -75,11 +86,10 @@ CRITICAL RULES:
 3. MANDATORY IMAGE ANALYSIS: In the document chunks, images are represented as relative links like `../images/{{image_id}}/image.png`. If a chunk contains an image link and the user's question asks about visual details, charts, figures, tables, or if the text indicates that details are illustrated in a figure, you MUST explicitly call the `vision_tool` with that exact image link (e.g., `../images/{{image_id}}/image.png`) to extract and understand the visual content. Do not guess or ignore images.
 4. EXACT TOOL NAMES: The 'Action:' field MUST contain exactly one of the tool names: [{tool_names}]. Do not translate the tool name or add extra spaces. Example: Action: retrieve_tool
 5. STOP AFTER ACTION INPUT: You are the THINKER, not the executor. Once you generate 'Action Input:', you MUST STOP. DO NOT generate 'Observation:'. The system will execute the tool and provide the observation back to you.
-6. ANALYSIS MODE ("{mode}"): 
-   - If mode is "answer", be direct, concise, and find the specific fact quickly.
-   - If mode is "analyze", do not stop at superficial answers. Dig deep into multiple aspects, use tools multiple times if needed, and provide comprehensive context, but keep it strictly focused on the core user query. Do not drift into unrelated topics or details.
-7. ALL your internal thoughts and tool actions MUST be in English. ONLY the Final Answer should be translated to {state.get("language", "English")}.
-8. RETRY AND REFORMULATE ON FAILURE: If a search or retrieve tool returns no results, irrelevant context, or a tool error, do not give up immediately. Reflect on why it failed, reformulate your query (use synonyms, translation, broader/narrower search terms), and execute the tool again with the updated query.
+6. ALL your internal thoughts and tool actions MUST be in English. ONLY the Final Answer should be translated to {state.get("language", "English")}.
+7. RETRY AND REFORMULATE ON FAILURE: If a search or retrieve tool returns no results, irrelevant context, or a tool error, do not give up immediately. Reflect on why it failed, reformulate your query (use synonyms, translation, broader/narrower search terms), and execute the tool again with the updated query.
+8. WEB SEARCH ON LOW RELEVANCE: If the retrieve_tool warns that the maximum relevance score of the retrieved chunks is low (e.g., < 0.5), it means the local document does not contain the answer. In this case, you MUST immediately call the web_search_tool with a well-formulated search query to find the answer on the web instead of retrieving from the database again.
+9. MANDATORY THINKING PROCESS: Under each 'Thought:' section, you must write a detailed explanation (1-2 sentences) of your reasoning process before specifying the Action or Final Answer. Do not jump directly to 'Action:' or leave the thought empty.
 
 Use the following strict format:
 
@@ -109,14 +119,29 @@ Final Answer: The Transformer architecture relies entirely on an attention mecha
 
 Begin!
 
+Current Loop Iteration: {iterations + 1} of 4.{loop_warning}
+
 Question: {query}
-Thought:{scratchpad}"""
+{scratchpad}"""
 
         logger.info(f"[{self.name}] Reasoning Node Iteration {iterations}")
         
         try:
             # Call Ollama with stop words to prevent hallucinating the observation
             response_text = self.llm.generate(prompt, stop=["\nObservation:", "Observation:"])
+            
+            # ── Guard: if model returns empty output, retry once with a nudge ──
+            if not response_text or not response_text.strip():
+                logger.warning(f"[{self.name}] LLM returned empty response. Retrying with explicit nudge.")
+                nudge_prompt = prompt + " I need to use the retrieve_tool to find relevant information."
+                response_text = self.llm.generate(nudge_prompt, stop=["\nObservation:", "Observation:"])
+                
+            if not response_text or not response_text.strip():
+                logger.error(f"[{self.name}] LLM returned empty response twice. Forcing fallback.")
+                return {
+                    "final_answer": "Xin lỗi, tôi không thể xử lý yêu cầu này. Mô hình ngôn ngữ không tạo ra phản hồi.",
+                    "iterations": iterations + 1
+                }
             
             # Explicitly log the LLM's raw output for full visibility
             logger.info(f"[{self.name}] Raw Output:\n{response_text}")
@@ -134,7 +159,9 @@ Thought:{scratchpad}"""
             action_input_match = re.search(r"Action Input:\s*(.*?)(?:\n|$)", response_text)
             
             # Extract Thought before the Action
-            thought_match = re.search(r"^(.*?)\nAction:", response_text, re.DOTALL)
+            thought_match = re.search(r"Thought:\s*(.*?)\nAction:", response_text, re.DOTALL)
+            if not thought_match:
+                thought_match = re.search(r"^(.*?)\nAction:", response_text, re.DOTALL)
             thought = thought_match.group(1).strip() if thought_match else response_text.strip()
             
             # Save thought to explicitly log in structured output
@@ -231,7 +258,7 @@ Thought:{scratchpad}"""
 
         # Append observation to scratchpad
         scratchpad = state.get("scratchpad", "")
-        new_scratchpad = scratchpad + f"Observation: {obs_str}\nThought: "
+        new_scratchpad = scratchpad + f"Observation: {obs_str}\n"
         
         context_used = state.get("context_used", [])
         context_used.append(f"Used {action_name}. Retrieved {len(str(observation))} characters.")
@@ -246,17 +273,16 @@ Thought:{scratchpad}"""
     def _route_after_reasoning(self, state: AgentGraphState) -> str:
         if state.get("final_answer"):
             return "end"
-        if state.get("iterations", 0) > 5:
+        if state.get("iterations", 0) > 3:
             logger.warning(f"[{self.name}] Max iterations reached. Terminating sub-graph.")
             return "end"
         return "tool"
 
-    def run(self, query: str, language: str = "English", mode: str = "answer") -> AgentResponse:
-        logger.info(f"=== Starting {self.name} Sub-Graph (Mode: {mode}) ===")
+    def run(self, query: str, language: str = "English") -> AgentResponse:
+        logger.info(f"=== Starting {self.name} Sub-Graph ===")
         initial_state = AgentGraphState(
             query=query,
             language=language,
-            mode=mode,
             scratchpad="",
             thought_process=[],
             context_used=[],
@@ -273,7 +299,7 @@ Thought:{scratchpad}"""
         logger.info(f"=== {self.name} Sub-Graph Finished ===")
         return AgentResponse(
             thought_process=thought_process_str,
-            content=final_state.get("final_answer", "No final answer."),
+            content=final_state.get("final_answer") or "No final answer.",
             context_used=final_state.get("context_used", []),
             retrieved_docs=final_state.get("retrieved_docs", [])
         )

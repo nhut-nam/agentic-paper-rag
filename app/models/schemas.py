@@ -19,8 +19,7 @@ class AgentType(str, Enum):
     PLANNER = "planner"
 
 class QueryComplexity(BaseModel):
-    mode: str
-    reason: str
+    reason: str = ""
     language: str = "English"
     rewritten_query: Optional[str] = None
     is_ambiguous: bool = False

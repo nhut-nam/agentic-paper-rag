@@ -6,9 +6,9 @@ from app.pipelines.retrieve import RetrievePipeline
 from app.utils.logger import logger
 from app.utils.db import DatabaseHandler
 
-def get_retrieve_tool(doc_id: Optional[str] = None):
+def get_retrieve_tool(doc_id: Optional[str] = None, doc_ids: Optional[List[str]] = None):
     """
-    Returns a configured retrieve_tool that is scoped to a specific doc_id if provided.
+    Returns a configured retrieve_tool that is scoped to a specific doc_id or list of doc_ids if provided.
     """
     @tool("retrieve_tool")
     def retrieve_tool(query: str, top_k: int = 3) -> str:
@@ -21,12 +21,12 @@ def get_retrieve_tool(doc_id: Optional[str] = None):
             query (str): The search query to look for in the database.
             top_k (int, optional): The maximum number of results to return. Defaults to 3.
         """
-        logger.info(f"Retrieve tool invoked with query: '{query}', top_k: {top_k}, doc_id: {doc_id}")
+        logger.info(f"Retrieve tool invoked with query: '{query}', top_k: {top_k}, doc_id: {doc_id}, doc_ids: {doc_ids}")
     
         try:
             # Initialize the existing pipeline
             pipeline = RetrievePipeline()
-            results = pipeline.run(query=query, top_k=top_k, doc_id=doc_id)
+            results = pipeline.run(query=query, top_k=top_k, doc_id=doc_id, doc_ids=doc_ids)
             
             if not results:
                 return f"No relevant documents found for query: '{query}'."
@@ -92,7 +92,20 @@ def get_retrieve_tool(doc_id: Optional[str] = None):
                     
                 formatted_results.append(chunk_formatted)
                 
-            return "\n\n".join(formatted_results)
+            # Calculate maximum score
+            max_score = max([res.get("combined_score", 0.0) for res in results]) if results else 0.0
+            
+            output_text = "\n\n".join(formatted_results)
+            if max_score < 0.5:
+                warning_text = (
+                    f"\n\n[WARNING] The maximum relevance score of the local database chunks is very low ({max_score:.2f} < 0.5).\n"
+                    "This strongly suggests that the local paper/documents do not contain the answer to your query.\n"
+                    "To find the correct answer, you MUST now use the web_search_tool instead of trying to retrieve from the database again.\n"
+                )
+                output_text += warning_text
+                logger.info(f"Retrieve score is low ({max_score:.2f} < 0.5). Appended warning message to tool output.")
+            
+            return output_text
             
         except Exception as e:
             logger.error(f"Retrieve tool failed: {e}")

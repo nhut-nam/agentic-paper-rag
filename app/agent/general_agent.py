@@ -68,12 +68,11 @@ class GeneralAgent(BaseAgent):
             
         return {"final_answer": response_text}
         
-    def run(self, query: str, language: str = "English", mode: str = "answer", is_ambiguous: bool = False) -> AgentResponse:
+    def run(self, query: str, language: str = "English", is_ambiguous: bool = False) -> AgentResponse:
         logger.info(f"=== Starting {self.name} Sub-Graph ===")
         initial_state = AgentGraphState(
             query=query,
             language=language,
-            mode=mode,
             scratchpad="",
             thought_process=[],
             context_used=[],
@@ -89,7 +88,7 @@ class GeneralAgent(BaseAgent):
         
         return AgentResponse(
             thought_process="Answered directly by GeneralAgent.",
-            content=final_state.get("final_answer", "No answer."),
+            content=final_state.get("final_answer") or "No answer.",
             context_used=[],
             retrieved_docs=[]
         )

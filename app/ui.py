@@ -173,17 +173,21 @@ def api_run_ragas_eval(memory_id: int):
         else:
             return None, res.json().get("detail", "Lỗi đánh giá Ragas.")
     except Exception as e:
-        return None, f"Kết nối API đánh giá thất bại: {e}"
+        return None, str(e)
 
 # Initialize Streamlit Session States
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "active_doc_id" not in st.session_state:
-    st.session_state.active_doc_id = None
-if "active_doc_name" not in st.session_state:
-    st.session_state.active_doc_name = None
+if "active_doc_ids" not in st.session_state:
+    st.session_state.active_doc_ids = []
+if "active_doc_names" not in st.session_state:
+    st.session_state.active_doc_names = []
 if "eval_scores" not in st.session_state:
     st.session_state.eval_scores = {}
+if "session_id" not in st.session_state:
+    st.session_state.session_id = None
+if "session_summary" not in st.session_state:
+    st.session_state.session_summary = None
 
 # ----------------- SIDEBAR -----------------
 with st.sidebar:
@@ -191,7 +195,32 @@ with st.sidebar:
     st.markdown('<p style="color: #6b7280; font-size: 0.9rem;">Khung Chat Agent & Pipeline Đánh Giá Ragas</p>', unsafe_allow_html=True)
     st.write("---")
     
-    # Section 1: Upload New PDF
+    # Section 1: Active Session Context
+    st.markdown("### 🧠 Ngữ Cảnh Session Hiện Tại")
+    if st.session_state.session_id:
+        st.markdown(f"**Session ID:** `{st.session_state.session_id[:8]}...`")
+        
+        summary = st.session_state.session_summary
+        if summary:
+            st.markdown("**Tóm tắt phiên chat (Session Summary):**")
+            st.info(summary)
+        else:
+            st.markdown("*Chưa có tóm tắt hội thoại.*")
+    else:
+        st.markdown("*Chưa có session hoạt động.*")
+        
+    if st.button("🔄 Khởi Tạo Session Mới", use_container_width=True):
+        st.session_state.messages = []
+        st.session_state.eval_scores = {}
+        st.session_state.session_id = None
+        st.session_state.session_summary = None
+        st.success("Đã tạo phiên hội thoại mới!")
+        time.sleep(1)
+        st.rerun()
+        
+    st.write("---")
+    
+    # Section 2: Upload New PDF
     st.markdown("### 📤 Tải Lên PDF Mới")
     uploaded_file = st.file_uploader("Chọn tệp PDF", type=["pdf"])
     if uploaded_file is not None:
@@ -207,7 +236,11 @@ with st.sidebar:
                 if res_upload and res_upload.get("status") == "uploaded":
                     st.success("Tải tệp lên API server thành công!")
                     time.sleep(1)
+                    st.rerun("i tệp lên API server thành công!")
+                    time.sleep(1)
                     st.rerun()
+                else:
+                    st.error("Có lỗi xảy ra khi tải tệp lên API server.")
 
     # Section 2: Global/Local PDFs Selection
     st.markdown("### 📂 Thư Viện Tệp Tin (Global PDFs)")
@@ -240,64 +273,99 @@ with st.sidebar:
                 status_label = f"[Chưa đăng ký] {filename}"
             pdf_options[path] = status_label
             
-        selected_pdf_path = st.selectbox(
+        if "active_pdf_paths" not in st.session_state:
+            st.session_state.active_pdf_paths = []
+
+        selected_pdf_paths = st.multiselect(
             "Chọn tài liệu hoạt động",
             options=list(pdf_options.keys()),
-            format_func=lambda x: pdf_options[x]
+            format_func=lambda x: pdf_options[x],
+            default=st.session_state.active_pdf_paths
         )
+        st.session_state.active_pdf_paths = selected_pdf_paths
         
-        if selected_pdf_path:
-            db_doc = path_to_doc.get(selected_pdf_path)
-            if not db_doc:
-                # File not registered on server yet. Click to register
-                if st.button("Đăng ký tệp này lên API Server", use_container_width=True):
-                    with st.spinner("Đang đăng ký tệp..."):
-                        res_upload = api_upload_pdf(selected_pdf_path)
-                        if res_upload and res_upload.get("status") == "uploaded":
-                            st.success("Đăng ký thành công!")
-                            st.rerun()
-            else:
-                st.session_state.active_doc_id = db_doc["doc_id"]
-                st.session_state.active_doc_name = os.path.basename(db_doc["path"])
-                
-                # Render status & ingestion control
-                doc_id = db_doc["doc_id"]
-                status = db_doc["status"]
-                
-                st.markdown(f"**Tài liệu hiện tại:** `{st.session_state.active_doc_name}`")
-                
-                # Dynamic badge status
-                if status in ["chunked", "completed"]:
-                    st.markdown('Trạng thái: <span class="badge-completed">Đã Ingest & Phân Mảnh</span>', unsafe_allow_html=True)
+        if selected_pdf_paths:
+            active_ids = []
+            active_names = []
+            unregistered_paths = []
+            pending_ingest_docs = []
+            
+            for path in selected_pdf_paths:
+                db_doc = path_to_doc.get(path)
+                if not db_doc:
+                    unregistered_paths.append(path)
                 else:
-                    st.markdown(f'Trạng thái: <span class="badge-pending">{status}</span>', unsafe_allow_html=True)
-                
-                # Trigger Ingestion Pipeline
-                ingest_label = "🚀 Bắt đầu Ingest Tài Liệu" if status not in ["chunked", "completed"] else "🔄 Ingest Lại Tài Liệu (Cập nhật vector)"
-                if st.button(ingest_label, use_container_width=True):
-                    res_ingest = api_trigger_ingest(doc_id)
-                    if res_ingest and "started" in res_ingest.get("status", ""):
-                        # Start polling status
-                        status_placeholder = st.empty()
-                        progress_bar = st.progress(0)
+                    active_ids.append(db_doc["doc_id"])
+                    active_names.append(os.path.basename(db_doc["path"]))
+                    if db_doc["status"] not in ["chunked", "completed"]:
+                        pending_ingest_docs.append(db_doc)
                         
-                        for percent in range(1, 101):
-                            # Fetch latest status from api
-                            latest_doc = api_get_status(doc_id)
+            st.session_state.active_doc_ids = active_ids
+            st.session_state.active_doc_names = active_names
+            
+            if unregistered_paths:
+                st.warning(f"Có {len(unregistered_paths)} tệp chưa đăng ký trên API server.")
+                if st.button("Đăng ký tất cả các tệp này", use_container_width=True):
+                    with st.spinner("Đang đăng ký các tệp tin..."):
+                        for u_path in unregistered_paths:
+                            api_upload_pdf(u_path)
+                        st.success("Đăng ký thành công!")
+                        time.sleep(0.5)
+                        st.rerun()
+            
+            st.markdown("**Trạng thái các tài liệu đã chọn:**")
+            for path in selected_pdf_paths:
+                db_doc = path_to_doc.get(path)
+                if db_doc:
+                    status = db_doc["status"]
+                    filename = os.path.basename(path)
+                    if status in ["chunked", "completed"]:
+                        st.markdown(f"✅ `{filename}`: <span class='badge-completed'>Đã Ingest</span>", unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"⏳ `{filename}`: <span class='badge-pending'>{status}</span>", unsafe_allow_html=True)
+            
+            if pending_ingest_docs:
+                if st.button("🚀 Ingest các tài liệu chưa xử lý", use_container_width=True):
+                    status_placeholder = st.empty()
+                    progress_bar = st.progress(0)
+                    
+                    for doc in pending_ingest_docs:
+                        api_trigger_ingest(doc["doc_id"])
+                        
+                    for percent in range(1, 101):
+                        all_done = True
+                        statuses = []
+                        for doc in pending_ingest_docs:
+                            latest_doc = api_get_status(doc["doc_id"])
                             current_status = latest_doc["status"] if latest_doc else "unknown"
-                            
-                            status_placeholder.info(f"Đang xử lý Ingest... (Trạng thái hiện tại: {current_status})")
-                            progress_bar.progress(percent)
-                            
-                            if current_status in ["chunked", "completed"]:
-                                st.success("Ingest và đánh chỉ mục tài liệu hoàn tất!")
-                                time.sleep(1)
-                                st.rerun()
-                                break
-                            time.sleep(1.5)
-                        else:
-                            st.warning("Quá trình Ingest đang chạy ngầm trên server. Vui lòng F5 trang sau ít phút.")
+                            statuses.append(f"{os.path.basename(doc['path'])}: {current_status}")
+                            if current_status not in ["chunked", "completed"]:
+                                all_done = False
+                                
+                        status_placeholder.info("Đang xử lý Ingest...\n" + "\n".join(statuses))
+                        progress_bar.progress(percent)
+                        
+                        if all_done:
+                            st.success("Tất cả tài liệu đã Ingest hoàn tất!")
+                            time.sleep(1)
                             st.rerun()
+                            break
+                        time.sleep(1.5)
+                    else:
+                        st.warning("Quá trình Ingest đang chạy ngầm. Vui lòng F5 trang sau ít phút.")
+                        st.rerun()
+            else:
+                if st.button("🔄 Ingest lại tất cả tài liệu", use_container_width=True):
+                    for path in selected_pdf_paths:
+                        db_doc = path_to_doc.get(path)
+                        if db_doc:
+                            api_trigger_ingest(db_doc["doc_id"])
+                    st.success("Đã yêu cầu Ingest lại!")
+                    time.sleep(0.5)
+                    st.rerun()
+        else:
+            st.session_state.active_doc_ids = []
+            st.session_state.active_doc_names = []
                                 
     st.write("---")
     if st.button("🗑️ Xóa Lịch Sử Chat", use_container_width=True):
@@ -309,8 +377,9 @@ with st.sidebar:
 st.markdown('<div class="dashboard-title">💬 Trò Chuyện Với Tài Liệu Trí Tuệ AI</div>', unsafe_allow_html=True)
 
 # Document header badge
-if st.session_state.active_doc_id:
-    st.info(f"📍 **Đang kết nối tài liệu:** `{st.session_state.active_doc_name}` (ID: `{st.session_state.active_doc_id[:8]}...`)")
+if st.session_state.get("active_doc_ids"):
+    names_str = ", ".join([f"`{name}`" for name in st.session_state.active_doc_names])
+    st.info(f"📍 **Đang kết nối ({len(st.session_state.active_doc_ids)} tài liệu):** {names_str}")
 else:
     st.warning("⚠️ Chưa chọn tài liệu. Agent sẽ trả lời dựa trên kiến thức toàn cục hoặc web search.")
 
@@ -377,8 +446,8 @@ if st.session_state.messages and st.session_state.messages[-1]["role"] == "user"
             try:
                 # Call agent query API endpoint
                 payload = {"query": query_to_run}
-                if st.session_state.active_doc_id:
-                    payload["doc_id"] = st.session_state.active_doc_id
+                if st.session_state.get("active_doc_ids"):
+                    payload["doc_ids"] = ",".join(st.session_state.active_doc_ids)
                     
                 res = requests.post(f"{BASE_URL}/agent/query", params=payload)
                 

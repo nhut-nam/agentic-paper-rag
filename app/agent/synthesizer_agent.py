@@ -34,12 +34,6 @@ class SynthesizerAgent(BaseAgent):
         docs_context = ""
         if retrieved_docs:
             docs_context = "\n".join([f"- Document [{i+1}] contents: {doc[:1000]}..." for i, doc in enumerate(retrieved_docs)])
-            
-        mode_instruction = ""
-        if mode == "analyze":
-            mode_instruction = "The user requires a DEEP ANALYSIS. Detail the comparison and synthesized facts from the research. Do not be overly brief, but keep it highly structured and strictly focused on the core query. Absolutely do not drift into unrelated points, details, or background information that are not directly relevant to the query."
-        else:
-            mode_instruction = "The user requires a DIRECT ANSWER. Be extremely concise, direct, and straight to the point. Remove any unnecessary words, thoughts, or formatting."
 
         # Parameterized prompt with strict high-priority directive at the top
         prompt = f"""
@@ -57,7 +51,7 @@ class SynthesizerAgent(BaseAgent):
         4. OUTPUT LANGUAGE: The final response must be written entirely and exclusively in {language}. Translate the relevant English findings to {language}.
         5. NO HALLUCINATION: Do not make up any new facts or claims not supported by the detailed research analysis.
         6. NO RELEVANT INFO HANDLER: If neither the 'Detailed Research Analysis' nor the 'Available Document References' contain enough relevant information to directly answer the User Query, you must state: 'Không tìm thấy thông tin phù hợp trong tài liệu để trả lời câu hỏi này.' (or the equivalent statement in {language}). Do not write a summary of unrelated document contents.
-        7. {mode_instruction}
+        7. Be concise and direct. Answer the question clearly without unnecessary padding.
         
         User Query:
         "{query}"
@@ -79,12 +73,11 @@ class SynthesizerAgent(BaseAgent):
             
         return {"final_answer": response_text}
         
-    def run(self, query: str, language: str = "English", mode: str = "answer", findings: str = "", retrieved_docs: List[str] = []) -> AgentResponse:
+    def run(self, query: str, language: str = "English", findings: str = "", retrieved_docs: List[str] = []) -> AgentResponse:
         logger.info(f"=== Starting {self.name} ===")
         initial_state = AgentGraphState(
             query=query,
             language=language,
-            mode=mode,
             findings=findings,
             retrieved_docs=retrieved_docs,
             scratchpad="",
@@ -100,7 +93,7 @@ class SynthesizerAgent(BaseAgent):
         
         return AgentResponse(
             thought_process=f"Synthesized research analysis into {language}.",
-            content=final_state.get("final_answer", "No answer."),
+            content=final_state.get("final_answer") or "No answer.",
             context_used=[],
             retrieved_docs=[]
         )

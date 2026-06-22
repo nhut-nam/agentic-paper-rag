@@ -9,7 +9,6 @@ class AgentGraphState(TypedDict):
     """
     query: str
     language: str
-    mode: Optional[str]
     scratchpad: str            # Accumulates Thought, Action, Observation history
     thought_process: List[str] # Explicitly stores thoughts for structured logging/response
     context_used: List[str]    # Records which tools were used and the size/info of the result

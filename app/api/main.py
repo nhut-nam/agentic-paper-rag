@@ -165,24 +165,31 @@ async def retrieve_info(query: str, top_k: int = 5):
     return results
 
 @app.post("/agent/query")
-async def run_agent_query(query: str, doc_id: str = None, session_id: str = None):
+async def run_agent_query(query: str, doc_id: str = None, doc_ids: str = None, session_id: str = None):
     """
     Process a query through the Agent Workflow.
-    Can be optionally scoped to a specific doc_id and session_id.
+    Can be optionally scoped to a specific doc_id, doc_ids (comma-separated), and session_id.
     """
-    logger.info(f"API received query for Agent Workflow: {query} (doc_id: {doc_id}, session_id: {session_id})")
+    logger.info(f"API received query for Agent Workflow: {query} (doc_id: {doc_id}, doc_ids: {doc_ids}, session_id: {session_id})")
     try:
+        parsed_doc_ids = []
+        if doc_ids:
+            parsed_doc_ids = [d.strip() for d in doc_ids.split(",") if d.strip()]
+        if doc_id and doc_id not in parsed_doc_ids:
+            parsed_doc_ids.append(doc_id)
+
         llm_provider = LLMFactory.get_provider("ollama")
         workflow = AgentWorkflow(llm_provider=llm_provider)
         
-        final_state = workflow.run(query, doc_id=doc_id, session_id=session_id)
+        final_state = workflow.run(query, doc_id=doc_id, doc_ids=parsed_doc_ids, session_id=session_id)
         
         # Format output for API response
         response_data = {
             "query": final_state.get("query"),
             "mode": final_state.get("mode"),
             "language": final_state.get("language"),
-            "session_id": final_state.get("session_id")
+            "session_id": final_state.get("session_id"),
+            "session_summary": final_state.get("session_summary")
         }
         
         plan = final_state.get("plan")

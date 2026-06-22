@@ -16,9 +16,8 @@ class LLMFactory:
         
         if provider_type == "ollama":
             return OllamaProvider()
-        
-        # Add future providers here:
-        # elif provider_type == "openai":
-        #     return OpenAIProvider()
+        elif provider_type == "groq":
+            from app.llm.groq_provider import GroqProvider
+            return GroqProvider()
             
         raise ValueError(f"Unsupported LLM provider: {provider_type}")
