@@ -11,7 +11,7 @@ def get_retrieve_tool(doc_id: Optional[str] = None, doc_ids: Optional[List[str]]
     Returns a configured retrieve_tool that is scoped to a specific doc_id or list of doc_ids if provided.
     """
     @tool("retrieve_tool")
-    def retrieve_tool(query: str, top_k: int = 3) -> str:
+    def retrieve_tool(query: str, top_k: int = 8) -> str:
         """
         Search the local knowledge base (database) for documents matching the given query.
         Use this tool whenever you need to find factual information, context, or documents related to the user's topic.
@@ -19,7 +19,7 @@ def get_retrieve_tool(doc_id: Optional[str] = None, doc_ids: Optional[List[str]]
         
         Args:
             query (str): The search query to look for in the database.
-            top_k (int, optional): The maximum number of results to return. Defaults to 3.
+            top_k (int, optional): The maximum number of results to return. Defaults to 8.
         """
         logger.info(f"Retrieve tool invoked with query: '{query}', top_k: {top_k}, doc_id: {doc_id}, doc_ids: {doc_ids}")
     

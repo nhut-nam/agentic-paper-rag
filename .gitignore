@@ -26,3 +26,8 @@ logs/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Experimental & scratch directory
+scratch/*
+!scratch/*.py
+scratch/__pycache__/

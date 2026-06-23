@@ -177,7 +177,7 @@ def main():
             res = requests.post(
                 f"{BASE_URL}/agent/query",
                 params={"query": question_text, "doc_id": doc_id},
-                timeout=180,      # 3 phút / câu
+                timeout=300,      # Tăng lên 5 phút / câu để đồng bộ với run_vit_test
             )
             q_latency = time.time() - q_start
 
@@ -187,16 +187,23 @@ def main():
                 print(f"  [WARN] API status {res.status_code}: {res.text[:200]}")
 
         except requests.exceptions.Timeout:
-            print("  [WARN] Timeout sau 180 giây.")
-            q_latency = 180
+            print("  [WARN] Timeout sau 300 giây.")
+            q_latency = 300
         except Exception as e:
             print(f"  [WARN] Lỗi kết nối: {e}")
 
         # ── Chấm điểm Groq ─────────────────────────────────────────────────
         print("  Đang chấm điểm bằng Groq...")
         eval_res = evaluate_answer(question_text, ground_truth, agent_answer)
-        score  = eval_res.get("score", 0)
-        reason = eval_res.get("reason", "N/A")
+        
+        # Đọc điểm số và lý do, đảm bảo hỗ trợ cả trường hợp khóa viết hoa hoặc kiểu dữ liệu chuỗi (string)
+        raw_score = eval_res.get("score") or eval_res.get("Score") or 0
+        try:
+            score = int(raw_score)
+        except (ValueError, TypeError):
+            score = 0
+            
+        reason = eval_res.get("reason") or eval_res.get("Reason") or "N/A"
 
         status = "ĐÚNG" if score >= 7 else "SAI"
         if score >= 7:

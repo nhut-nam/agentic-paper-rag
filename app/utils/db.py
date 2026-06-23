@@ -191,16 +191,16 @@ class DatabaseHandler:
         conn = self.get_connection()
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # Weighted score: 70% Vector similarity + 30% Keyword overlap
+                # Weighted score: 70% Vector similarity + 30% Keyword overlap in content
                 if target_ids:
                     sql = """
                     SELECT *, 
                            (1 - (embedding <=> %s::vector)) AS vector_score,
-                           (SELECT count(*) FROM unnest(keywords) k WHERE k = ANY(%s)) AS keyword_score
+                           (SELECT count(*)::int FROM unnest(%s) kw WHERE content ILIKE '%%' || kw || '%%') AS keyword_score
                     FROM chunks
                     WHERE doc_id = ANY(%s)
                     ORDER BY ((1 - (embedding <=> %s::vector)) * 0.7 + 
-                             (SELECT count(*) FROM unnest(keywords) k WHERE k = ANY(%s)) * 0.3) DESC
+                             (SELECT count(*)::int FROM unnest(%s) kw WHERE content ILIKE '%%' || kw || '%%') * 0.3) DESC
                     LIMIT %s
                     """
                     cur.execute(sql, (query_vector, query_keywords, target_ids, query_vector, query_keywords, limit))
@@ -208,10 +208,10 @@ class DatabaseHandler:
                     sql = """
                     SELECT *, 
                            (1 - (embedding <=> %s::vector)) AS vector_score,
-                           (SELECT count(*) FROM unnest(keywords) k WHERE k = ANY(%s)) AS keyword_score
+                           (SELECT count(*)::int FROM unnest(%s) kw WHERE content ILIKE '%%' || kw || '%%') AS keyword_score
                     FROM chunks
                     ORDER BY ((1 - (embedding <=> %s::vector)) * 0.7 + 
-                             (SELECT count(*) FROM unnest(keywords) k WHERE k = ANY(%s)) * 0.3) DESC
+                             (SELECT count(*)::int FROM unnest(%s) kw WHERE content ILIKE '%%' || kw || '%%') * 0.3) DESC
                     LIMIT %s
                     """
                     cur.execute(sql, (query_vector, query_keywords, query_vector, query_keywords, limit))

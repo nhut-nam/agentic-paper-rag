@@ -33,7 +33,15 @@ class SynthesizerAgent(BaseAgent):
         # Build reference logs for the LLM to verify citations (truncated to 1000 chars to avoid context collapse)
         docs_context = ""
         if retrieved_docs:
-            docs_context = "\n".join([f"- Document [{i+1}] contents: {doc[:1000]}..." for i, doc in enumerate(retrieved_docs)])
+            # Deduplicate documents while preserving order
+            seen = set()
+            unique_docs = []
+            for doc in retrieved_docs:
+                doc_clean = doc.strip()
+                if doc_clean and doc_clean not in seen:
+                    seen.add(doc_clean)
+                    unique_docs.append(doc_clean)
+            docs_context = "\n".join([f"- Document [{i+1}] contents: {doc[:1000]}..." for i, doc in enumerate(unique_docs)])
 
         # Parameterized prompt with strict high-priority directive at the top
         prompt = f"""

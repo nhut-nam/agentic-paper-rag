@@ -6,6 +6,7 @@ from app.agent.planner import Planner
 from app.agent.research_agent import ResearchAgent
 from app.agent.general_agent import GeneralAgent
 from app.agent.synthesizer_agent import SynthesizerAgent
+from app.agent.verifier import ContextVerifier
 from app.utils.logger import logger
 from app.llm.base import BaseLLMProvider
 from app.utils.db import DatabaseHandler
@@ -29,6 +30,8 @@ class AgentState(TypedDict):
     session_id: Optional[str]
     session_summary: Optional[str]
     is_ambiguous: Optional[bool]
+    verification_retries: Optional[int]
+    verifier_feedback: Optional[str]
 
 class AgentWorkflow:
     """
@@ -58,6 +61,7 @@ class AgentWorkflow:
             self.synthesizer = SynthesizerAgent(llm=self.llm_provider)
             
         self.db = DatabaseHandler()
+        self.verifier = ContextVerifier(llm=self.llm_provider)
         self.app = self._build_graph()
 
     def _analyzer_node(self, state: AgentState):
@@ -205,6 +209,63 @@ class AgentWorkflow:
             "final_answer": final_answer
         }
 
+    def _verifier_node(self, state: AgentState):
+        logger.info("--- ENTERING VERIFIER NODE ---")
+        query = state["query"]
+        retries = state.get("verification_retries") or 0
+        
+        # Combine context list from tasks execution findings
+        context_list = state.get("global_context", [])
+        combined_context = "\n\n---\n\n".join(context_list)
+        
+        # Run verification check
+        ver_result = self.verifier.verify(query=query, context=combined_context)
+        sufficient = ver_result.get("sufficient", True)
+        feedback = ver_result.get("feedback", "")
+        
+        # Cap retries at 2
+        if sufficient or retries >= 2:
+            if not sufficient:
+                logger.warning(f"Context is still insufficient after {retries} retries. Proceeding to synthesis anyway.")
+            else:
+                logger.info("Verification succeeded: context is sufficient.")
+            return {
+                "verifier_feedback": None,
+                "verification_retries": retries
+            }
+            
+        logger.info(f"Verification failed. Feedback: {feedback}. Creating follow-up task.")
+        
+        # Create a follow-up task
+        import uuid
+        plan_id = state["plan"].id if state.get("plan") else str(uuid.uuid4())
+        
+        # Build a precise task content targeting the missing information
+        suggested_kws = ver_result.get("suggested_keywords", [])
+        if suggested_kws:
+            kws_str = ", ".join(suggested_kws)
+            new_task_content = f"The previous research results were insufficient. Find and retrieve missing information: {feedback} Specifically search the database using keywords: {kws_str}."
+        else:
+            new_task_content = f"The previous research results were insufficient. Find and retrieve missing information: {feedback}"
+        
+        # Since ResearchAgent is the default research agent, we route to AgentType.RESEARCH.
+        tasks = state.get("tasks", [])
+        new_task = Task(
+            id=str(uuid.uuid4()),
+            plan_id=plan_id,
+            content=new_task_content,
+            agent_type=AgentType.RESEARCH,
+            task_order=len(tasks) + 1
+        )
+        
+        logger.info(f"Appended task {new_task.task_order}: {new_task_content}")
+        
+        return {
+            "tasks": tasks + [new_task],
+            "verification_retries": retries + 1,
+            "verifier_feedback": feedback
+        }
+
     def _general_agent_node(self, state: AgentState):
         logger.info("--- ENTERING GENERAL AGENT NODE (ambiguous/chitchat) ---")
         query = state["query"]
@@ -226,7 +287,7 @@ class AgentWorkflow:
 
     def _route_execution(self, state: AgentState) -> str:
         """
-        Routes either to the next task in the executor, or to the synthesizer if all tasks are done.
+        Routes either to the next task in the executor, or to the verifier if all tasks are done.
         """
         tasks = state.get("tasks", [])
         idx = state.get("current_task_idx", 0)
@@ -234,6 +295,22 @@ class AgentWorkflow:
         if idx < len(tasks):
             return "execute"
         else:
+            return "verify"
+
+    def _route_verification(self, state: AgentState) -> str:
+        """
+        Routes back to execute if verification failed and a new task was appended, otherwise to synthesize.
+        """
+        feedback = state.get("verifier_feedback")
+        retries = state.get("verification_retries", 0)
+        tasks = state.get("tasks", [])
+        idx = state.get("current_task_idx", 0)
+        
+        if feedback and idx < len(tasks) and retries <= 2:
+            logger.info(f"Verification failed. New task appended. Routing back to executor (retry {retries}).")
+            return "execute"
+        else:
+            logger.info("Verification succeeded or max retries reached. Routing to synthesizer.")
             return "synthesize"
 
     def _build_graph(self):
@@ -246,6 +323,7 @@ class AgentWorkflow:
         workflow.add_node("general_agent", self._general_agent_node)
         workflow.add_node("planner", self._planner_node)
         workflow.add_node("executor", self._executor_node)
+        workflow.add_node("verifier", self._verifier_node)
         workflow.add_node("synthesizer", self._synthesizer_node)
 
         # Flow
@@ -270,7 +348,7 @@ class AgentWorkflow:
             self._route_execution,
             {
                 "execute": "executor",
-                "synthesize": "synthesizer"
+                "verify": "verifier"
             }
         )
         
@@ -278,6 +356,16 @@ class AgentWorkflow:
         workflow.add_conditional_edges(
             "executor",
             self._route_execution,
+            {
+                "execute": "executor",
+                "verify": "verifier"
+            }
+        )
+        
+        # After verification, check if we should loop back to executor or proceed to synthesis
+        workflow.add_conditional_edges(
+            "verifier",
+            self._route_verification,
             {
                 "execute": "executor",
                 "synthesize": "synthesizer"
@@ -339,7 +427,10 @@ class AgentWorkflow:
             memory_id=None,
             retrieved_docs=[],
             session_id=session_id,
-            session_summary=session_summary
+            session_summary=session_summary,
+            is_ambiguous=None,
+            verification_retries=0,
+            verifier_feedback=None
         )
         
         final_state = self.app.invoke(initial_state)

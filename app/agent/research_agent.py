@@ -250,11 +250,10 @@ Question: {query}
                         retrieved_docs.append(content_match.group(1).strip())
                     else:
                         retrieved_docs.append(c_clean)
-
         # Truncate the observation written to the scratchpad to save context window space
         obs_str = str(observation)
-        if len(obs_str) > 3000:
-            obs_str = obs_str[:3000] + "\n\n... [TRUNCATED due to length limits to prevent context window collapse] ..."
+        if len(obs_str) > 30000:
+            obs_str = obs_str[:30000] + f"\n\n... [TRUNCATED due to length limits (original size: {len(obs_str)}) to prevent context window collapse] ..."
 
         # Append observation to scratchpad
         scratchpad = state.get("scratchpad", "")
