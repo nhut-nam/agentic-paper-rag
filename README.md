@@ -97,3 +97,22 @@ $env:PYTHONPATH="."
 venv\Scripts\python.exe scratch/test_query_rewriting.py
 ```
 Nếu màn hình in ra kết quả `SUCCESS: Query was successfully rewritten...` và hiển thị câu hỏi mơ hồ được mở rộng đầy đủ ngữ cảnh, hệ thống của bạn đã hoạt động chính xác.
+
+---
+
+## 📊 Kết Quả Đánh Giá Chất Lượng (Evaluation Benchmark)
+
+Dưới đây là kết quả đánh giá chất lượng câu trả lời của Agent trên tập câu hỏi tự luận bài báo ViT (được chấm điểm tự động bởi mô hình Groq `llama-3.3-70b-versatile` dựa trên Ground Truth):
+
+*   **Tỷ lệ chính xác (Accuracy - Score ≥ 7)**: `75.0%` (3/4 câu đúng)
+*   **Tổng thời gian chạy**: `596.9s` (~9.9 phút)
+*   **Tài liệu thử nghiệm**: ViT Paper (Doc ID: `90034a5d-b97f-4a34-bacc-ef11780f5c89`)
+
+### Bảng kết quả chi tiết:
+
+| STT | Nội dung câu hỏi thử nghiệm | Điểm số | Trạng thái | Lý do / Đánh giá chi tiết |
+|:---:|---|:---:|:---:|---|
+| 1 | Xác định optimizer và batch size dùng cho pre-training JFT-300M và fine-tuning. | **8/10** | ✅ ĐÚNG | Trả lời chính xác Adam (4096) và SGD (512), chỉ thiếu chi tiết nhỏ về thông số $\beta_1$ và $\beta_2$. |
+| 2 | So sánh tài nguyên tính toán (TPUv3-core-days) và độ chính xác của ViT-L/16 và baseline BiT-L trên ImageNet (dựa trên Table 2). | **0/10** | ❌ SAI | Không đọc được bảng dạng Markdown thô nên trả lời không tìm thấy thông tin phù hợp (cần nâng cấp Vision OCR). |
+| 3 | Mức độ loại bỏ và cách tiêm thủ công *inductive biases* đặc thù ảnh 2D vào ViT. | **8/10** | ✅ ĐÚNG | Trả lời đúng các ý chính (quá trình trích xuất patch và nội suy 2D cho positional embeddings). |
+| 4 | Lý do sử dụng mã hóa vị trí 1D (1D position embeddings) tiêu chuẩn thay vì 2D phức tạp. | **8/10** | ✅ ĐÚNG | Trả lời đúng nguyên nhân từ thực nghiệm của nhóm tác giả (mã hóa 2D không mang lại hiệu năng vượt trội). |
