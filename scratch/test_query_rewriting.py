@@ -90,7 +90,6 @@ def main():
     print("\n=== TEST RESULTS ===")
     print(f"Original Query: '{q2}'")
     print(f"Rewritten Query: '{analysis.rewritten_query}'")
-    print(f"Detected Mode: '{analysis.mode}'")
     print(f"Detected Language: '{analysis.language}'")
     
     # Basic validation
@@ -110,7 +109,6 @@ def main():
     print("\n=== TEST RESULTS FOR TURN 3 ===")
     print(f"Original Query: '{q3}'")
     print(f"Detected is_ambiguous: {analysis3.is_ambiguous}")
-    print(f"Detected Mode: '{analysis3.mode}'")
     
     if analysis3.is_ambiguous:
         print("\nSUCCESS: Completely ambiguous query correctly detected!")
