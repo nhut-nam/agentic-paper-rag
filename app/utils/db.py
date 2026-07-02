@@ -1,5 +1,5 @@
 import psycopg2
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, Json
 from app.config.settings import settings
 from typing import List, Dict, Any, Optional
 from app.utils.logger import logger
@@ -86,8 +86,39 @@ class DatabaseHandler:
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
                 """)
+                
+                # 7. Create tasks table (Linked directly to query_memory via query_id)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS tasks (
+                        id VARCHAR(255) PRIMARY KEY,
+                        query_id INT NOT NULL REFERENCES query_memory(id) ON DELETE CASCADE,
+                        content TEXT NOT NULL,
+                        task_order INT NOT NULL,
+                        agent_type VARCHAR(50) NOT NULL DEFAULT 'research',
+                        status VARCHAR(50) NOT NULL DEFAULT 'pending',
+                        result JSONB DEFAULT '{}',
+                        metadata JSONB DEFAULT '{}',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+                
+                # 8. Create steps table (Linked to tasks, representing individual ReAct loop steps)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS steps (
+                        id VARCHAR(255) PRIMARY KEY,
+                        task_id VARCHAR(255) REFERENCES tasks(id) ON DELETE CASCADE,
+                        step_order INT NOT NULL,
+                        thought TEXT,
+                        action_name VARCHAR(255),
+                        action_input JSONB,
+                        observation TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+                
             conn.commit()
-            logger.info("Initialized system tables (session_chat, session_chat_documents, query_memory, summary_session, document_images) successfully.")
+            logger.info("Initialized system tables (session_chat, session_chat_documents, query_memory, summary_session, document_images, tasks, steps) successfully.")
         except Exception as e:
             logger.error(f"Failed to initialize system tables: {e}")
             conn.rollback()
@@ -444,5 +475,96 @@ class DatabaseHandler:
         except Exception as e:
             logger.error(f"Failed to fetch images by ids {image_ids}: {e}")
             return []
+        finally:
+            conn.close()
+
+    def insert_task(self, task_id: str, query_id: int, content: str, task_order: int, agent_type: str, status: str = 'pending', metadata: dict = {}):
+        conn = self.get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO tasks (id, query_id, content, task_order, agent_type, status, metadata)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (task_id, query_id, content, task_order, agent_type, status, Json(metadata))
+                )
+            conn.commit()
+            logger.info(f"Inserted task {task_id} into database linked to query {query_id}.")
+        except Exception as e:
+            logger.error(f"Failed to insert task {task_id}: {e}")
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def update_task_status(self, task_id: str, status: str, result: Optional[dict] = None, metadata: Optional[dict] = None):
+        conn = self.get_connection()
+        try:
+            with conn.cursor() as cur:
+                if result is not None and metadata is not None:
+                    cur.execute(
+                        "UPDATE tasks SET status = %s, result = %s, metadata = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                        (status, Json(result), Json(metadata), task_id)
+                    )
+                elif result is not None:
+                    cur.execute(
+                        "UPDATE tasks SET status = %s, result = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                        (status, Json(result), task_id)
+                    )
+                elif metadata is not None:
+                    cur.execute(
+                        "UPDATE tasks SET status = %s, metadata = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                        (status, Json(metadata), task_id)
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE tasks SET status = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                        (status, task_id)
+                    )
+            conn.commit()
+            logger.info(f"Updated task {task_id} status to {status}.")
+        except Exception as e:
+            logger.error(f"Failed to update task {task_id} status: {e}")
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def insert_step(self, step_id: str, task_id: str, step_order: int, thought: Optional[str] = None, action_name: Optional[str] = None, action_input: Optional[dict] = None, observation: Optional[str] = None):
+        conn = self.get_connection()
+        try:
+            input_json = Json(action_input) if action_input is not None else Json({})
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO steps (id, task_id, step_order, thought, action_name, action_input, observation)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (step_id, task_id, step_order, thought, action_name, input_json, observation)
+                )
+            conn.commit()
+            logger.info(f"Inserted step {step_id} (order {step_order}) for task {task_id}.")
+        except Exception as e:
+            logger.error(f"Failed to insert step {step_id}: {e}")
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def update_query_memory_response(self, memory_id: int, response: str, retrieved_contexts: List[str]):
+        conn = self.get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE query_memory SET response = %s, retrieved_contexts = %s WHERE id = %s",
+                    (response, retrieved_contexts, memory_id)
+                )
+            conn.commit()
+            logger.info(f"Updated query_memory ID {memory_id} with final response.")
+        except Exception as e:
+            logger.error(f"Failed to update query memory response: {e}")
+            conn.rollback()
+            raise
         finally:
             conn.close()

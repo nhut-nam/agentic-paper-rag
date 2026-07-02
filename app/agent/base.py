@@ -19,6 +19,7 @@ class AgentGraphState(TypedDict):
     iterations: int
     retrieved_docs: List[str]
     is_ambiguous: Optional[bool]
+    task_id: Optional[str]
 
 class BaseAgent(ABC):
     def __init__(self, name: str, role: str, llm: Any = None, tools: List[Any] = None, memory: Any = None):

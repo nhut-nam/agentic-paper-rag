@@ -125,6 +125,21 @@ class AgentWorkflow:
             agent_metadata=agent_metadata
         )
         
+        query_id = state.get("memory_id")
+        if query_id and tasks:
+            for task in tasks:
+                try:
+                    self.db.insert_task(
+                        task_id=task.id,
+                        query_id=query_id,
+                        content=task.content,
+                        task_order=task.task_order,
+                        agent_type=task.agent_type.value,
+                        status="pending"
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to log task {task.id} to database: {e}")
+
         return {
             "plan": plan,
             "tasks": tasks,
@@ -143,6 +158,12 @@ class AgentWorkflow:
         current_task = tasks[idx]
         logger.info(f"Executing Task {idx+1}/{len(tasks)}: [{current_task.agent_type.value.upper()}] {current_task.content}")
         
+        # Update task status to running in DB
+        try:
+            self.db.update_task_status(task_id=current_task.id, status="running")
+        except Exception as e:
+            logger.error(f"Failed to update task {current_task.id} status to running: {e}")
+            
         retrieved = []
         try:
             # Route to the appropriate agent
@@ -151,7 +172,7 @@ class AgentWorkflow:
                 doc_id = state.get("doc_id")
                 doc_ids = state.get("doc_ids")
                 research_agent = ResearchAgent(llm=self.llm_provider, doc_id=doc_id, doc_ids=doc_ids)
-                response_obj = research_agent.run(current_task.content, language="English")
+                response_obj = research_agent.run(current_task.content, language="English", task_id=current_task.id)
                 result_text = response_obj.content
                 thought_process = response_obj.thought_process
                 retrieved = response_obj.retrieved_docs
@@ -160,10 +181,23 @@ class AgentWorkflow:
                 doc_id = state.get("doc_id")
                 doc_ids = state.get("doc_ids")
                 research_agent = ResearchAgent(llm=self.llm_provider, doc_id=doc_id, doc_ids=doc_ids)
-                response_obj = research_agent.run(current_task.content, language="English")
+                response_obj = research_agent.run(current_task.content, language="English", task_id=current_task.id)
                 result_text = response_obj.content
                 thought_process = response_obj.thought_process
                 retrieved = response_obj.retrieved_docs
+                
+            # Update task status to completed in DB
+            try:
+                self.db.update_task_status(
+                    task_id=current_task.id,
+                    status="completed",
+                    result={
+                        "content": result_text,
+                        "thought_process": thought_process
+                    }
+                )
+            except Exception as e:
+                logger.error(f"Failed to update task {current_task.id} status to completed: {e}")
                 
             # Format context addition
             context_entry = f"Task: {current_task.content}\nResult: {result_text}"
@@ -171,6 +205,18 @@ class AgentWorkflow:
         except Exception as e:
             logger.error(f"Task execution failed: {e}", exc_info=True)
             context_entry = f"Task: {current_task.content}\nResult: Error encountered - {e}"
+            
+            # Update task status to failed in DB
+            try:
+                self.db.update_task_status(
+                    task_id=current_task.id,
+                    status="failed",
+                    result={
+                        "error": str(e)
+                    }
+                )
+            except Exception as db_err:
+                logger.error(f"Failed to update task {current_task.id} status to failed: {db_err}")
             
         current_context = state.get("global_context", [])
         current_context.append(context_entry)
@@ -260,6 +306,20 @@ class AgentWorkflow:
         
         logger.info(f"Appended task {new_task.task_order}: {new_task_content}")
         
+        query_id = state.get("memory_id")
+        if query_id:
+            try:
+                self.db.insert_task(
+                    task_id=new_task.id,
+                    query_id=query_id,
+                    content=new_task.content,
+                    task_order=new_task.task_order,
+                    agent_type=new_task.agent_type.value,
+                    status="pending"
+                )
+            except Exception as e:
+                logger.error(f"Failed to log retry task {new_task.id} to database: {e}")
+                
         return {
             "tasks": tasks + [new_task],
             "verification_retries": retries + 1,
@@ -410,6 +470,20 @@ class AgentWorkflow:
         except Exception as e:
             logger.error(f"Failed to load latest session summary: {e}")
 
+        # Create a placeholder in query_memory to get the query_id (memory_id)
+        memory_id = None
+        try:
+            memory_id = self.db.insert_query_memory(
+                query=query,
+                response="PENDING",
+                retrieved_contexts=[],
+                doc_id=doc_id,
+                session_id=session_id
+            )
+            logger.info(f"Created query_memory record with ID: {memory_id}")
+        except Exception as e:
+            logger.error(f"Failed to create initial query_memory record: {e}")
+
         logger.info(f"Starting workflow for query: '{query}' (doc_ids: {target_ids}, session_id: {session_id})")
         initial_state = AgentState(
             query=query,
@@ -424,7 +498,7 @@ class AgentWorkflow:
             current_task_idx=0,
             global_context=[],
             final_answer=None,
-            memory_id=None,
+            memory_id=memory_id,
             retrieved_docs=[],
             session_id=session_id,
             session_summary=session_summary,
@@ -440,20 +514,28 @@ class AgentWorkflow:
         logger.info(f"=== FINAL ANSWER ===\n{final_answer}\n====================")
         
         # Save query interaction to database memory for Ragas evaluation
-        memory_id = None
+        memory_id = final_state.get("memory_id")
         try:
             contexts = final_state.get("retrieved_docs", [])
             if not contexts:
                 contexts = final_state.get("global_context", [])
             if not contexts:
                 contexts = ["No context retrieved."]
-            memory_id = self.db.insert_query_memory(
-                query=query, # Save original user query
-                response=final_answer,
-                retrieved_contexts=contexts,
-                doc_id=doc_id,
-                session_id=session_id
-            )
+            
+            if memory_id:
+                self.db.update_query_memory_response(
+                    memory_id=memory_id,
+                    response=final_answer,
+                    retrieved_contexts=contexts
+                )
+            else:
+                memory_id = self.db.insert_query_memory(
+                    query=query, # Save original user query
+                    response=final_answer,
+                    retrieved_contexts=contexts,
+                    doc_id=doc_id,
+                    session_id=session_id
+                )
             
             # Generate updated session summary using LLM
             try:

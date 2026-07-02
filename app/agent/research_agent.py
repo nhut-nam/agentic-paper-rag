@@ -1,5 +1,5 @@
 import re
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from langgraph.graph import StateGraph, END
 from langchain_ollama import OllamaLLM
 from app.models.schemas import AgentResponse
@@ -7,6 +7,7 @@ from app.agent.base import BaseAgent, AgentGraphState
 from app.utils.logger import logger
 from app.tools import get_retrieve_tool, web_search_tool, get_vision_tool
 from app.config.settings import settings
+from app.utils.db import DatabaseHandler
 
 class ResearchAgent(BaseAgent):
     """
@@ -36,6 +37,7 @@ class ResearchAgent(BaseAgent):
         
         # Build tool dictionary mapping name to tool function
         self.tool_map = {tool.name: tool for tool in self.tools}
+        self.db = DatabaseHandler()
 
     def _build_graph(self):
         """
@@ -147,21 +149,10 @@ Question: {query}
             logger.info(f"[{self.name}] Raw Output:\n{response_text}")
             
             # Parse output using regex
-            # Look for Final Answer
-            final_answer_match = re.search(r"Final Answer:(.*?)(?:$|\n)", response_text, re.DOTALL)
-            if final_answer_match:
-                final_answer = final_answer_match.group(1).strip()
-                logger.info(f"[{self.name}] Found Final Answer: {final_answer}")
-                return {"final_answer": final_answer, "iterations": iterations + 1}
-                
-            # Look for Action and Action Input
-            action_match = re.search(r"Action:\s*(.*?)\n", response_text)
-            action_input_match = re.search(r"Action Input:\s*(.*?)(?:\n|$)", response_text)
-            
-            # Extract Thought before the Action
-            thought_match = re.search(r"Thought:\s*(.*?)\nAction:", response_text, re.DOTALL)
+            # 1. Parse Thought first
+            thought_match = re.search(r"Thought:\s*(.*?)\n(?:Action|Final Answer):", response_text, re.DOTALL)
             if not thought_match:
-                thought_match = re.search(r"^(.*?)\nAction:", response_text, re.DOTALL)
+                thought_match = re.search(r"^(.*?)\n(?:Action|Final Answer):", response_text, re.DOTALL)
             thought = thought_match.group(1).strip() if thought_match else response_text.strip()
             
             # Save thought to explicitly log in structured output
@@ -170,6 +161,36 @@ Question: {query}
             logger.info(f"[{self.name}] Parsed Thought: {thought}")
             
             new_scratchpad = scratchpad + f" {response_text}\n"
+            
+            # 2. Look for Final Answer
+            final_answer_match = re.search(r"Final Answer:(.*?)(?:$|\n)", response_text, re.DOTALL)
+            if final_answer_match:
+                final_answer = final_answer_match.group(1).strip()
+                logger.info(f"[{self.name}] Found Final Answer: {final_answer}")
+                
+                # Log final step to database
+                task_id = state.get("task_id")
+                if task_id:
+                    try:
+                        import uuid
+                        step_id = str(uuid.uuid4())
+                        self.db.insert_step(
+                            step_id=step_id,
+                            task_id=task_id,
+                            step_order=iterations + 1,
+                            thought=thought,
+                            action_name="Final Answer",
+                            action_input={"answer": final_answer},
+                            observation="Execution complete"
+                        )
+                    except Exception as db_err:
+                        logger.error(f"Failed to log final step: {db_err}")
+                        
+                return {"final_answer": final_answer, "iterations": iterations + 1, "thought_process": thoughts}
+                
+            # 3. Look for Action and Action Input
+            action_match = re.search(r"Action:\s*(.*?)\n", response_text)
+            action_input_match = re.search(r"Action Input:\s*(.*?)(?:\n|$)", response_text)
             
             if action_match and action_input_match:
                 action = action_match.group(1).strip()
@@ -186,11 +207,45 @@ Question: {query}
             
             # If no action and no final answer, force a final answer to prevent infinite loops
             logger.warning(f"[{self.name}] Failed to parse Action or Final Answer. Forcing end.")
-            return {"final_answer": response_text.strip(), "iterations": iterations + 1}
+            final_ans = response_text.strip()
+            task_id = state.get("task_id")
+            if task_id:
+                try:
+                    import uuid
+                    step_id = str(uuid.uuid4())
+                    self.db.insert_step(
+                        step_id=step_id,
+                        task_id=task_id,
+                        step_order=iterations + 1,
+                        thought=thought,
+                        action_name="Final Answer (Forced)",
+                        action_input={"answer": final_ans},
+                        observation="Execution forced complete"
+                    )
+                except Exception as db_err:
+                    logger.error(f"Failed to log forced final step: {db_err}")
+            return {"final_answer": final_ans, "iterations": iterations + 1, "thought_process": thoughts}
             
         except Exception as e:
             logger.error(f"[{self.name}] Reasoning failed: {e}")
-            return {"final_answer": f"Error during reasoning: {str(e)}", "iterations": iterations + 1}
+            final_ans = f"Error during reasoning: {str(e)}"
+            task_id = state.get("task_id")
+            if task_id:
+                try:
+                    import uuid
+                    step_id = str(uuid.uuid4())
+                    self.db.insert_step(
+                        step_id=step_id,
+                        task_id=task_id,
+                        step_order=iterations + 1,
+                        thought=f"Reasoning exception: {str(e)}",
+                        action_name="Error",
+                        action_input={"error": str(e)},
+                        observation="Execution failed"
+                    )
+                except Exception as db_err:
+                    logger.error(f"Failed to log error step: {db_err}")
+            return {"final_answer": final_ans, "iterations": iterations + 1}
 
     def _tool_node(self, state: AgentGraphState) -> dict:
         pending_action = state.get("pending_action")
@@ -261,6 +316,33 @@ Question: {query}
         
         context_used = state.get("context_used", [])
         context_used.append(f"Used {action_name}. Retrieved {len(str(observation))} characters.")
+        
+        # Log this step to the database (Option 1: Step = 1 ReAct iteration)
+        task_id = state.get("task_id")
+        if task_id:
+            try:
+                thought = ""
+                if state.get("thought_process"):
+                    thought = state["thought_process"][-1]
+                
+                input_data = action_input
+                if not isinstance(input_data, dict):
+                    input_data = {"value": input_data}
+                
+                import uuid
+                step_id = str(uuid.uuid4())
+                self.db.insert_step(
+                    step_id=step_id,
+                    task_id=task_id,
+                    step_order=state.get("iterations", 0),
+                    thought=thought,
+                    action_name=action_name,
+                    action_input=input_data,
+                    observation=str(observation)
+                )
+                logger.info(f"Logged ReAct step to DB for task {task_id}")
+            except Exception as e:
+                logger.error(f"Failed to log step to database: {e}")
             
         return {
             "scratchpad": new_scratchpad,
@@ -277,7 +359,7 @@ Question: {query}
             return "end"
         return "tool"
 
-    def run(self, query: str, language: str = "English") -> AgentResponse:
+    def run(self, query: str, language: str = "English", task_id: Optional[str] = None) -> AgentResponse:
         logger.info(f"=== Starting {self.name} Sub-Graph ===")
         initial_state = AgentGraphState(
             query=query,
@@ -288,7 +370,8 @@ Question: {query}
             pending_action=None,
             final_answer=None,
             iterations=0,
-            retrieved_docs=[]
+            retrieved_docs=[],
+            task_id=task_id
         )
         
         final_state = self.app.invoke(initial_state)
