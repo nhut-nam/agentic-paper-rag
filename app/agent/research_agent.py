@@ -1,4 +1,5 @@
 import re
+from app.utils.evidence import extract_final_answer, forced_answer_from_evidence
 from typing import Dict, Any, List, Optional
 from langgraph.graph import StateGraph, END
 from langchain_ollama import OllamaLLM
@@ -163,9 +164,8 @@ Question: {query}
             new_scratchpad = scratchpad + f" {response_text}\n"
             
             # 2. Look for Final Answer
-            final_answer_match = re.search(r"Final Answer:(.*?)(?:$|\n)", response_text, re.DOTALL)
-            if final_answer_match:
-                final_answer = final_answer_match.group(1).strip()
+            final_answer = extract_final_answer(response_text)
+            if final_answer:
                 logger.info(f"[{self.name}] Found Final Answer: {final_answer}")
                 
                 # Log final step to database
@@ -207,7 +207,9 @@ Question: {query}
             
             # If no action and no final answer, force a final answer to prevent infinite loops
             logger.warning(f"[{self.name}] Failed to parse Action or Final Answer. Forcing end.")
-            final_ans = response_text.strip()
+            # Do not pass on free-form text that may ignore the retrieved data;
+            # hand the raw evidence to the verifier/synthesizer instead.
+            final_ans = forced_answer_from_evidence(response_text, state.get("retrieved_docs", []))
             task_id = state.get("task_id")
             if task_id:
                 try:

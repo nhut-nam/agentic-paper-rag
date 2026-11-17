@@ -1,4 +1,5 @@
 from typing import TypedDict, List, Optional
+from app.utils.evidence import build_evidence_digest
 from langgraph.graph import StateGraph, END
 from app.models.schemas import Plan, Task, AgentType
 from app.agent.analyzer import ComplexityAnalyzer
@@ -263,6 +264,12 @@ class AgentWorkflow:
         # Combine context list from tasks execution findings
         context_list = state.get("global_context", [])
         combined_context = "\n\n---\n\n".join(context_list)
+
+        # Also show the verifier the raw retrieved evidence, not only the agents' summaries.
+        # (A summary can ignore a table that was actually retrieved.)
+        evidence = build_evidence_digest(state.get("retrieved_docs", []))
+        if evidence:
+            combined_context += "\n\n---\n\nRAW RETRIEVED EVIDENCE:\n" + evidence
         
         # Run verification check
         ver_result = self.verifier.verify(query=query, context=combined_context)
