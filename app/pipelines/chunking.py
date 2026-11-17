@@ -58,6 +58,11 @@ class ChunkingPipeline(BasePipeline):
             # 2. Perform smart chunking
             self.db.update_status(doc_id, "chunking")
             chunks = process_chunks(doc_id, markdown_path)
+
+            # Re-chunking must not leave stale chunks behind (chunk ids are positional).
+            removed = self.db.delete_chunks_by_doc_id(doc_id)
+            if removed:
+                logger.info(f"Removed {removed} old chunks for document {doc_id} before re-chunking.")
             
             # 3. Enhance chunks and Store in DB
             logger.info(f"Enhancing {len(chunks)} chunks with KeyBERT keywords and raw text embeddings...")
@@ -70,7 +75,10 @@ class ChunkingPipeline(BasePipeline):
                 chunk["summary"] = chunk["content"][:200] + "..." if content_len > 200 else chunk["content"]
                 
                 # Generate embeddings based directly on Raw Content (Semantic Precision)
-                chunk["embedding"] = self.llm_service.get_embeddings(chunk["content"])
+                # Prefix the section path so short chunks (tables, split parts) keep their context.
+                chunk["embedding"] = self.llm_service.get_embeddings(
+                    f"{chunk.get('heading_path', '')}\n{chunk['content']}"
+                )
                 
                 # Save to DB
                 self.db.insert_chunk(chunk)

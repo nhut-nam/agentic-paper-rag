@@ -116,3 +116,54 @@ Dưới đây là kết quả đánh giá chất lượng câu trả lời của
 | 2 | So sánh tài nguyên tính toán (TPUv3-core-days) và độ chính xác của ViT-L/16 và baseline BiT-L trên ImageNet (dựa trên Table 2). | **0/10** | ❌ SAI | Không đọc được bảng dạng Markdown thô nên trả lời không tìm thấy thông tin phù hợp (cần nâng cấp Vision OCR). |
 | 3 | Mức độ loại bỏ và cách tiêm thủ công *inductive biases* đặc thù ảnh 2D vào ViT. | **8/10** | ✅ ĐÚNG | Trả lời đúng các ý chính (quá trình trích xuất patch và nội suy 2D cho positional embeddings). |
 | 4 | Lý do sử dụng mã hóa vị trí 1D (1D position embeddings) tiêu chuẩn thay vì 2D phức tạp. | **8/10** | ✅ ĐÚNG | Trả lời đúng nguyên nhân từ thực nghiệm của nhóm tác giả (mã hóa 2D không mang lại hiệu năng vượt trội). |
+
+---
+
+## 🔬 Root cause của câu Table 2 (0/10) và cách sửa
+
+Đọc lại log của lần chạy benchmark cho thấy **retrieval không hề lỗi**: chunk mục 4.2 đã được trả về kèm khối `[RELATED TABLE]` chứa đủ số liệu (`0.68k`, `9.9k`, `87.76`, `87.54`). Câu trả lời vẫn sai vì 3 lỗi nối tiếp nhau ở các bước sau:
+
+| # | Lỗi | Hậu quả | Sửa |
+|---|---|---|---|
+| 1 | Model local không theo format ReAct (không có `Action:`/`Final Answer:`), agent "force end" và lấy **đoạn văn tự do** của model làm kết quả | Kết quả task là một bài tổng quan chung chung về ViT, bỏ mất bảng vừa retrieve | `forced_answer_from_evidence`: khi phải force end, chuyển **bằng chứng đã retrieve** đi tiếp thay vì đoạn văn tự do |
+| 2 | Verifier chỉ đọc phần tóm tắt của agent, không đọc bằng chứng gốc | Verifier kết luận "thiếu số liệu", tạo lại task 3 lần và lặp lại đúng lỗi trên | Verifier nhận thêm `RAW RETRIEVED EVIDENCE` |
+| 3 | Synthesizer cắt mỗi document ở **1.000 ký tự**, trong khi bảng nằm cuối chunk (sau khoảng 3.250 ký tự) | Số liệu không bao giờ tới được LLM cuối | `format_reference_docs`: chỉ cắt phần văn xuôi, giữ nguyên khối bảng/hình; có giới hạn tổng |
+
+Thêm các cải tiến nhỏ:
+- **Mỗi bảng thành một chunk riêng** (`Table N: caption` + bảng markdown), nên số liệu trong bảng được embed và tìm được bằng keyword.
+- **Tách section dài** theo đoạn văn (tối đa 1.500 ký tự). `all-MiniLM-L6-v2` chỉ đọc khoảng 256 token, nên trước đây section dài chỉ được embed phần đầu.
+- **Embedding có thêm heading path** của section.
+- **Re-chunk xoá chunk cũ** trước khi ghi lại, để không còn chunk thừa.
+- **Bắt `Final Answer:` nhiều dòng.** Regex cũ chỉ lấy dòng đầu tiên.
+
+Unit test tái hiện lỗi (chạy không cần DB/LLM): `pytest tests/`.
+
+## 📏 Bộ đánh giá mới: 28 câu, chấm điểm tự động không cần LLM
+
+`eval/vit_qa.json` có 28 câu: 10 text, 10 bảng, 3 phụ lục, 2 multi-hop, 3 câu **không có trong bài** (agent phải trả lời là không tìm thấy). Mọi đáp án đều đã được đối chiếu với nội dung bài báo.
+
+Mỗi câu được chấm theo các tiêu chí:
+- **Correct:** câu trả lời có đủ mọi key fact (số liệu/thuật ngữ, chấp nhận nhiều cách viết như `0.68k` / `0,68k`). Với câu không có trong bài, agent phải từ chối trả lời.
+- **Evidence hit:** retrieval có trả về đoạn chứa đáp án hay không. Tiêu chí này giúp tách lỗi retrieval khỏi lỗi suy luận/tổng hợp.
+- **LLM judge (Groq):** chỉ là chỉ số phụ. Nếu gọi API lỗi thì ghi nhận là lỗi, không gán điểm 5 giả như script cũ.
+
+Chạy 3 lần để thấy tác dụng của từng nhóm thay đổi (API phải đang chạy; script eval chỉ gọi HTTP nên dùng được với code nào cũng được):
+
+```bash
+# A) Baseline: code cũ + chunk cũ
+git checkout master
+git checkout feat/rag-eval-fixes -- eval          # lấy riêng thư mục eval sang
+#    (khởi động lại uvicorn)
+python -m eval.run_eval --label A_baseline
+
+# B) Code mới (agent/verifier/synthesizer) + chunk cũ
+git checkout feat/rag-eval-fixes
+#    (khởi động lại uvicorn)
+python -m eval.run_eval --label B_agent_fixes
+
+# C) Code mới + re-chunk (bảng thành chunk riêng, tách section dài)
+curl -X POST http://127.0.0.1:8000/chunk/<doc_id>
+python -m eval.run_eval --label C_full
+
+python -m eval.compare eval/results/A_baseline.json eval/results/C_full.json
+```

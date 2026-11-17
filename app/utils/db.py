@@ -211,6 +211,21 @@ class DatabaseHandler:
         finally:
             conn.close()
 
+    def delete_chunks_by_doc_id(self, doc_id: str) -> int:
+        """Delete all chunks of a document (used before re-chunking). Returns rows deleted."""
+        conn = self.get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM chunks WHERE doc_id = %s", (doc_id,))
+                deleted = cur.rowcount
+            conn.commit()
+            return deleted
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def hybrid_search(self, query_vector: list, query_keywords: list, limit: int = 5, doc_id: Optional[str] = None, doc_ids: Optional[List[str]] = None) -> List[dict]:
         # Merge doc_id and doc_ids into a unique list
         target_ids = []
