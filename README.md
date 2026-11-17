@@ -1,68 +1,126 @@
-# Multi-agent RAG
+# 📄 PaperInteligentAI: Multi-Agent RAG cho bài báo khoa học
 
-Hệ thống RAG nâng cao kết hợp Multi-Agent (đại lý đa tác vụ) để đọc, phân tích và trả lời câu hỏi về bài báo khoa học. Dự án sử dụng mô hình LLM chạy cục bộ (Ollama) kết hợp LangGraph để điều phối luồng xử lý.
+Hệ thống hỏi đáp trên bài báo khoa học (PDF). Hệ thống đọc cả **bảng, công thức và hình**, trả lời kèm **trích dẫn nguồn [1], [2]**, nhớ ngữ cảnh hội thoại và tự hỏi lại khi câu hỏi mơ hồ. Mô hình chạy cục bộ bằng **Ollama**, các agent được điều phối bằng **LangGraph**, backend dùng **FastAPI** và lưu trữ trên **PostgreSQL + pgvector**.
 
-## Kiến trúc hệ thống
-Hệ thống được chia thành 2 phần rõ rệt:
-1. **Backend (FastAPI)**: Đảm nhận việc xử lý PDF, trích xuất ảnh/bảng biểu, lập chỉ mục vector, lưu lịch sử hội thoại vào database và chạy luồng xử lý Agent.
-2. **Frontend (Streamlit)**: Giao diện web gửi/nhận yêu cầu hoàn toàn qua API backend.
-
-### Quy trình xử lý câu hỏi (Agent Loop)
-```
-[User Query] -> [Complexity Analyzer]
-                       |
-     +-----------------+-----------------+
-     | (Mơ hồ/Không rõ)                  | (Câu hỏi hợp lệ)
-     v                                   v
-[General Agent]                  [Planner (Lập kế hoạch)]
- (Hỏi lại/Làm rõ)                        |
-                                         v
-                                  [Research Agent] (Chạy tiếng Anh)
-                                  - Hybrid Search (Vector + KeyBERT)
-                                  - Web Search
-                                  - Vision (Đọc công thức/Bảng)
-                                         |
-                                         v
-                                  [Synthesizer Agent]
-                                  - Biên soạn & Lọc nhiễu
-                                  - Dịch về tiếng Việt
-                                  - Trích dẫn nguồn [1], [2]
-```
-
-## Các tính năng chính
-- **Đọc PDF & Trích xuất Ảnh**: Tách hình ảnh bảng biểu, công thức toán và chạy OCR để nhúng vào ngữ cảnh tìm kiếm.
-- **Tìm kiếm Hybrid Search**: Kết hợp Vector Embedding và trích xuất từ khóa bằng mô hình cục bộ KeyBERT giúp tìm kiếm khớp thuật ngữ chuyên ngành.
-- **Bộ nhớ hội thoại động (Session Memory)**: Tự động lưu tóm tắt phiên chat vào bảng `summary_session` trong Postgres. Khi có câu hỏi tiếp theo (ví dụ: *"Câu này chọn câu nào"*), Agent tự load tóm tắt cũ để viết lại thành câu hỏi đầy đủ ngữ cảnh.
-- **Hỏi làm rõ câu hỏi mơ hồ**: Tự động phát hiện câu hỏi quá cụt lủn hoặc mơ hồ (khi không có ngữ cảnh cũ) và đưa qua GeneralAgent để phản hồi hỏi lại người dùng làm rõ ý.
-- **Đánh giá Ragas**: Tích hợp endpoint đánh giá chất lượng câu trả lời của Agent dựa trên dữ liệu thật lưu trong DB.
+Điểm chính: hệ thống được **đánh giá bằng bộ test có đáp án kiểm chứng** chứ không chỉ dựa vào demo. Khi có câu trả lời sai, lỗi được truy đến tận nguyên nhân gốc trong log (xem phần [Debug: câu Table 2](#-debug-câu-table-2-010)).
 
 ---
 
-## Hướng dẫn cài đặt và khởi chạy
+## Kiến trúc
 
-### Yêu cầu hệ thống
+```mermaid
+flowchart TD
+    Q[Câu hỏi] --> A[Complexity Analyzer<br/>viết lại câu hỏi theo ngữ cảnh phiên,<br/>phát hiện câu mơ hồ]
+    A -- mơ hồ --> G[General Agent<br/>hỏi lại người dùng]
+    A -- rõ ràng --> P[Planner<br/>chia thành task]
+    P --> R[Research Agent ReAct<br/>retrieve · web search · vision]
+    R --> V{Context Verifier<br/>đủ bằng chứng?}
+    V -- thiếu, tạo task bổ sung --> R
+    V -- đủ --> S[Synthesizer<br/>tổng hợp, dịch, trích dẫn]
+```
+
+| Thành phần | Công nghệ |
+|---|---|
+| Đọc PDF | `marker-pdf`. Bảng, công thức và code được tách thành ảnh, phần text trích được lưu kèm (`content.md`) |
+| Chunking | Chia theo heading, tách section dài, **mỗi bảng là một chunk riêng** |
+| Retrieval | Hybrid search (pgvector cosine + keyword KeyBERT) → rerank bằng cross-encoder `ms-marco-MiniLM-L-6-v2` |
+| Embedding | `sentence-transformers/all-MiniLM-L6-v2` (chạy local) |
+| LLM | Ollama (`qwen2.5:7b-instruct`) cho agent; Groq cho synthesizer (nếu có key) |
+| Vision | Ollama `minicpm-v` để đọc hình khi cần |
+| Bộ nhớ | Tóm tắt phiên lưu trong bảng `summary_session` (Postgres); câu hỏi tiếp theo được viết lại kèm ngữ cảnh |
+| Backend / UI | FastAPI + Streamlit (UI chỉ gọi qua API) |
+
+---
+
+## 🔍 Debug: câu Table 2 (0/10)
+
+Trong bản benchmark thử nghiệm đầu tiên (4 câu), câu hỏi về **Bảng 2** của bài ViT bị chấm 0/10, agent trả lời "không tìm thấy thông tin". Ban đầu mình nghĩ lỗi là do không đọc được bảng. Khi đọc lại log, mình thấy **retrieval hoàn toàn đúng**: chunk mục 4.2 được trả về kèm khối `[RELATED TABLE]` chứa đủ `0.68k`, `9.9k`, `87.76`, `87.54`. Câu trả lời vẫn sai vì 3 lỗi nối tiếp nhau:
+
+| # | Lỗi | Hậu quả | Cách sửa |
+|---|---|---|---|
+| 1 | Model local không theo format ReAct, agent "force end" và lấy **đoạn văn tự do** của model làm kết quả | Kết quả task là một bài tổng quan chung chung về ViT, bảng vừa retrieve bị bỏ mất | Khi phải force end, chuyển **bằng chứng đã retrieve** đi tiếp (`forced_answer_from_evidence`) |
+| 2 | Verifier chỉ đọc bản tóm tắt của agent, không đọc bằng chứng gốc | Verifier kết luận "thiếu số liệu", tạo task mới 3 lần và lặp lại đúng lỗi trên | Verifier nhận thêm `RAW RETRIEVED EVIDENCE` |
+| 3 | Synthesizer cắt mỗi document ở **1.000 ký tự**, trong khi bảng nằm cuối chunk dài khoảng 3.250 ký tự | Số liệu không bao giờ tới được LLM cuối | Chỉ cắt phần văn xuôi, giữ nguyên khối bảng/hình, có giới hạn tổng (`format_reference_docs`) |
+
+Các cải tiến khác:
+- **Mỗi bảng thành một chunk riêng** (`Table N: caption` + bảng markdown), nên số liệu được embed và tìm được bằng keyword.
+- **Tách section dài** theo đoạn văn (tối đa 1.500 ký tự). Model embedding chỉ đọc khoảng 256 token, nên trước đây section dài chỉ được embed phần đầu.
+- **Embedding có thêm heading path** của section.
+- **Re-chunk xoá chunk cũ** trước khi ghi lại.
+- **Bắt `Final Answer:` nhiều dòng.** Regex cũ chỉ lấy dòng đầu.
+
+Các lỗi trên được tái hiện bằng unit test chạy không cần DB/LLM: `pytest tests/`.
+
+---
+
+## 📏 Đánh giá
+
+### Bộ test: `eval/vit_qa.json` (28 câu)
+
+| Loại | Số câu | Ví dụ |
+|---|---|---|
+| text | 10 | optimizer / batch size, kích thước dataset, self-supervision |
+| table | 10 | số liệu trong Bảng 1–4 và bảng ablation position embedding |
+| appendix | 3 | SGD vs Adam cho ResNet, warmup, dev split |
+| multi-hop | 2 | kết hợp Bảng 1 và Bảng 2 |
+| unanswerable | 3 | hỏi những gì bài báo **không có** (COCO mAP, chi phí USD...). Agent phải trả lời là không tìm thấy |
+
+Mọi đáp án đều đã được đối chiếu với nội dung bài báo.
+
+### Cách chấm
+
+- **Correct:** câu trả lời có đủ mọi *key fact* (số liệu/thuật ngữ, chấp nhận nhiều cách viết như `0.68k` / `0,68k`). Với câu unanswerable, agent phải từ chối trả lời. Phần này chấm **tự động, không dùng LLM**.
+- **Evidence hit:** retrieval có trả về đoạn chứa đáp án không. Tiêu chí này tách lỗi *tìm kiếm* khỏi lỗi *suy luận/tổng hợp*.
+- **LLM judge (Groq, 0–10):** chỉ số phụ. Nếu gọi API lỗi thì ghi nhận là lỗi, không gán điểm giả.
+
+### Chạy và so sánh
+
+Script eval chỉ gọi HTTP API, nên dùng được với cả code cũ lẫn code mới:
+
+```bash
+# A) Baseline: code cũ + chunk cũ
+git checkout master
+git checkout feat/rag-eval-fixes -- eval        # chỉ lấy thư mục eval sang
+#   (khởi động lại uvicorn)
+python -m eval.run_eval --label A_baseline
+
+# B) Code mới + chunk cũ
+git checkout feat/rag-eval-fixes
+#   (khởi động lại uvicorn)
+python -m eval.run_eval --label B_agent_fixes
+
+# C) Code mới + re-chunk
+curl -X POST http://127.0.0.1:8000/chunk/<doc_id>
+python -m eval.run_eval --label C_full
+
+python -m eval.compare eval/results/A_baseline.json eval/results/C_full.json
+```
+
+Báo cáo (Markdown + JSON) được lưu ở `eval/results/`.
+
+---
+
+## Cài đặt và khởi chạy
+
+### Yêu cầu
 - Python 3.10+
-- Docker (để chạy PostgreSQL + pgvector)
-- Ollama (đã cài đặt mô hình `qwen3.5:cloud` hoặc dòng mô hình tương đương)
+- Docker (PostgreSQL + pgvector)
+- Ollama với `qwen2.5:7b-instruct-q4_K_M` (và `minicpm-v` nếu dùng vision)
 
-### Bước 1: Khởi động Database
-Khởi động container Postgres có cài sẵn extension pgvector:
+### 1. Database
 ```bash
 docker compose up -d
 ```
 
-### Bước 2: Cài đặt thư viện Python
-Tạo môi trường ảo và cài đặt dependencies:
+### 2. Thư viện
 ```bash
 python -m venv venv
-venv\Scripts\activate      # Trên Windows
-source venv/bin/activate   # Trên Linux/macOS
-
+venv\Scripts\activate          # Windows
+source venv/bin/activate       # Linux/macOS
 pip install -r requirements.txt
 ```
 
-### Bước 3: Cấu hình file `.env`
-Tạo file `.env` ở thư mục gốc (nếu chưa có) và điền các thông tin:
+### 3. File `.env`
 ```env
 DB_HOST=localhost
 DB_PORT=5432
@@ -70,100 +128,45 @@ DB_NAME=paper_intel
 DB_USER=postgres
 DB_PASSWORD=postgres
 OLLAMA_BASE_URL=http://localhost:11434
-# Nếu muốn dùng đánh giá Ragas thì điền thêm key Groq
+# Dùng Groq cho synthesizer, Ragas và LLM judge
 GROQ_API_KEY=your_groq_api_key
 ```
 
-### Bước 4: Chạy API Backend (FastAPI)
+### 4. Backend (FastAPI)
 ```bash
-$env:PYTHONUNBUFFERED="1"  # Trên Windows PowerShell
-venv\Scripts\python.exe -m uvicorn app.api.main:app --host 127.0.0.1 --port 8000
+python -m uvicorn app.api.main:app --host 127.0.0.1 --port 8000
 ```
-Backend sẽ khởi chạy tại: `http://127.0.0.1:8000`. Database sẽ tự động được chạy lệnh di trú (migration) để tạo các bảng cần thiết trong lần chạy đầu tiên.
+Bảng dữ liệu được tạo tự động ở lần chạy đầu.
 
-### Bước 5: Chạy Giao diện UI (Streamlit)
-Mở một terminal mới, kích hoạt môi trường ảo và chạy:
+### 5. Giao diện (Streamlit)
 ```bash
-venv\Scripts\python.exe -m streamlit run app/ui.py
+python -m streamlit run app/ui.py
 ```
-Giao diện sẽ tự động mở tại: `http://localhost:8501`.
+
+### API chính
+
+| Endpoint | Chức năng |
+|---|---|
+| `POST /upload-pdf` | Upload PDF |
+| `POST /ingest/{doc_id}` | PDF → Markdown → chunk → embedding |
+| `POST /chunk/{doc_id}` | Chunk lại tài liệu (xoá chunk cũ) |
+| `POST /retrieve` | Hybrid search |
+| `POST /agent/query` | Hỏi đáp qua toàn bộ luồng agent |
+| `POST /evaluate-memory` | Đánh giá Ragas trên lịch sử hỏi đáp lưu trong DB |
 
 ---
 
-## Kiểm thử & Xác minh tính năng
-Bạn có thể chạy trực tiếp script giả lập hội thoại đa lượt để xem tính năng ghi nhớ ngữ cảnh và tự viết lại câu hỏi mơ hồ hoạt động như thế nào:
-```bash
-$env:PYTHONPATH="."
-venv\Scripts\python.exe scratch/test_query_rewriting.py
+## Cấu trúc thư mục
+
 ```
-Nếu màn hình in ra kết quả `SUCCESS: Query was successfully rewritten...` và hiển thị câu hỏi mơ hồ được mở rộng đầy đủ ngữ cảnh, hệ thống của bạn đã hoạt động chính xác.
-
----
-
-## 📊 Kết Quả Đánh Giá Chất Lượng (Evaluation Benchmark)
-
-Dưới đây là kết quả đánh giá chất lượng câu trả lời của Agent trên tập câu hỏi tự luận bài báo ViT (được chấm điểm tự động bởi mô hình Groq `llama-3.3-70b-versatile` dựa trên Ground Truth):
-
-*   **Tỷ lệ chính xác (Accuracy - Score ≥ 7)**: `75.0%` (3/4 câu đúng)
-*   **Tổng thời gian chạy**: `596.9s` (~9.9 phút)
-*   **Tài liệu thử nghiệm**: ViT Paper (Doc ID: `90034a5d-b97f-4a34-bacc-ef11780f5c89`)
-
-### Bảng kết quả chi tiết:
-
-| STT | Nội dung câu hỏi thử nghiệm | Điểm số | Trạng thái | Lý do / Đánh giá chi tiết |
-|:---:|---|:---:|:---:|---|
-| 1 | Xác định optimizer và batch size dùng cho pre-training JFT-300M và fine-tuning. | **8/10** | ✅ ĐÚNG | Trả lời chính xác Adam (4096) và SGD (512), chỉ thiếu chi tiết nhỏ về thông số $\beta_1$ và $\beta_2$. |
-| 2 | So sánh tài nguyên tính toán (TPUv3-core-days) và độ chính xác của ViT-L/16 và baseline BiT-L trên ImageNet (dựa trên Table 2). | **0/10** | ❌ SAI | Không đọc được bảng dạng Markdown thô nên trả lời không tìm thấy thông tin phù hợp (cần nâng cấp Vision OCR). |
-| 3 | Mức độ loại bỏ và cách tiêm thủ công *inductive biases* đặc thù ảnh 2D vào ViT. | **8/10** | ✅ ĐÚNG | Trả lời đúng các ý chính (quá trình trích xuất patch và nội suy 2D cho positional embeddings). |
-| 4 | Lý do sử dụng mã hóa vị trí 1D (1D position embeddings) tiêu chuẩn thay vì 2D phức tạp. | **8/10** | ✅ ĐÚNG | Trả lời đúng nguyên nhân từ thực nghiệm của nhóm tác giả (mã hóa 2D không mang lại hiệu năng vượt trội). |
-
----
-
-## 🔬 Root cause của câu Table 2 (0/10) và cách sửa
-
-Đọc lại log của lần chạy benchmark cho thấy **retrieval không hề lỗi**: chunk mục 4.2 đã được trả về kèm khối `[RELATED TABLE]` chứa đủ số liệu (`0.68k`, `9.9k`, `87.76`, `87.54`). Câu trả lời vẫn sai vì 3 lỗi nối tiếp nhau ở các bước sau:
-
-| # | Lỗi | Hậu quả | Sửa |
-|---|---|---|---|
-| 1 | Model local không theo format ReAct (không có `Action:`/`Final Answer:`), agent "force end" và lấy **đoạn văn tự do** của model làm kết quả | Kết quả task là một bài tổng quan chung chung về ViT, bỏ mất bảng vừa retrieve | `forced_answer_from_evidence`: khi phải force end, chuyển **bằng chứng đã retrieve** đi tiếp thay vì đoạn văn tự do |
-| 2 | Verifier chỉ đọc phần tóm tắt của agent, không đọc bằng chứng gốc | Verifier kết luận "thiếu số liệu", tạo lại task 3 lần và lặp lại đúng lỗi trên | Verifier nhận thêm `RAW RETRIEVED EVIDENCE` |
-| 3 | Synthesizer cắt mỗi document ở **1.000 ký tự**, trong khi bảng nằm cuối chunk (sau khoảng 3.250 ký tự) | Số liệu không bao giờ tới được LLM cuối | `format_reference_docs`: chỉ cắt phần văn xuôi, giữ nguyên khối bảng/hình; có giới hạn tổng |
-
-Thêm các cải tiến nhỏ:
-- **Mỗi bảng thành một chunk riêng** (`Table N: caption` + bảng markdown), nên số liệu trong bảng được embed và tìm được bằng keyword.
-- **Tách section dài** theo đoạn văn (tối đa 1.500 ký tự). `all-MiniLM-L6-v2` chỉ đọc khoảng 256 token, nên trước đây section dài chỉ được embed phần đầu.
-- **Embedding có thêm heading path** của section.
-- **Re-chunk xoá chunk cũ** trước khi ghi lại, để không còn chunk thừa.
-- **Bắt `Final Answer:` nhiều dòng.** Regex cũ chỉ lấy dòng đầu tiên.
-
-Unit test tái hiện lỗi (chạy không cần DB/LLM): `pytest tests/`.
-
-## 📏 Bộ đánh giá mới: 28 câu, chấm điểm tự động không cần LLM
-
-`eval/vit_qa.json` có 28 câu: 10 text, 10 bảng, 3 phụ lục, 2 multi-hop, 3 câu **không có trong bài** (agent phải trả lời là không tìm thấy). Mọi đáp án đều đã được đối chiếu với nội dung bài báo.
-
-Mỗi câu được chấm theo các tiêu chí:
-- **Correct:** câu trả lời có đủ mọi key fact (số liệu/thuật ngữ, chấp nhận nhiều cách viết như `0.68k` / `0,68k`). Với câu không có trong bài, agent phải từ chối trả lời.
-- **Evidence hit:** retrieval có trả về đoạn chứa đáp án hay không. Tiêu chí này giúp tách lỗi retrieval khỏi lỗi suy luận/tổng hợp.
-- **LLM judge (Groq):** chỉ là chỉ số phụ. Nếu gọi API lỗi thì ghi nhận là lỗi, không gán điểm 5 giả như script cũ.
-
-Chạy 3 lần để thấy tác dụng của từng nhóm thay đổi (API phải đang chạy; script eval chỉ gọi HTTP nên dùng được với code nào cũng được):
-
-```bash
-# A) Baseline: code cũ + chunk cũ
-git checkout master
-git checkout feat/rag-eval-fixes -- eval          # lấy riêng thư mục eval sang
-#    (khởi động lại uvicorn)
-python -m eval.run_eval --label A_baseline
-
-# B) Code mới (agent/verifier/synthesizer) + chunk cũ
-git checkout feat/rag-eval-fixes
-#    (khởi động lại uvicorn)
-python -m eval.run_eval --label B_agent_fixes
-
-# C) Code mới + re-chunk (bảng thành chunk riêng, tách section dài)
-curl -X POST http://127.0.0.1:8000/chunk/<doc_id>
-python -m eval.run_eval --label C_full
-
-python -m eval.compare eval/results/A_baseline.json eval/results/C_full.json
+app/
+├── agent/       analyzer, planner, research_agent (ReAct), verifier, synthesizer, agent_loop (LangGraph)
+├── api/         FastAPI
+├── llm/         Ollama / Groq providers, embedding, reranker
+├── pipelines/   ingest, pdf2markdown, chunking, retrieve
+├── services/    pdf_handler (marker), chunker
+├── tools/       retrieve_tool, web_search_tool, vision_tool
+└── utils/       db, evidence (ngân sách ngữ cảnh), logger, storage
+eval/            Bộ 28 câu + script chấm + so sánh
+tests/           Unit test (không cần DB/LLM)
 ```
